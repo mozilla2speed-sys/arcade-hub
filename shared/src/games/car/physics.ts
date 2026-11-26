@@ -3,9 +3,10 @@
  * Used by both server (authoritative) and client (prediction / visuals).
  */
 
-export const R = 0.38;          // wheel radius
-export const WB = 2.8;          // wheelbase
-export const VMAX = 55;         // m/s ≈ 198 km/h
+export const R = 0.38; // wheel radius
+export const WB = 2.8; // wheelbase
+export const VMAX = 55; // m/s ≈ 198 km/h
+export const TRACK_RADIUS = 46;
 
 export interface CarBody {
   x: number;
@@ -20,6 +21,10 @@ export interface CarBody {
   laps: number;
   best: number;
   lapStart: number;
+  raceStart: number;
+  finished: boolean;
+  finishPlace: number;
+  totalTime: number;
 }
 
 export interface InputState {
@@ -30,9 +35,10 @@ export interface InputState {
   brake: boolean;
 }
 
-export function createCar(x = 46, z = 0): CarBody {
+export function createCar(x = TRACK_RADIUS, z = 0): CarBody {
   return {
-    x, z,
+    x,
+    z,
     heading: 0,
     v: 0,
     steer: 0,
@@ -42,23 +48,53 @@ export function createCar(x = 46, z = 0): CarBody {
     lastAng: Math.atan2(z, x),
     laps: 0,
     best: 0,
-    lapStart: performance.now?.() ?? Date.now(),
+    lapStart: Date.now(),
+    raceStart: Date.now(),
+    finished: false,
+    finishPlace: 0,
+    totalTime: 0,
   };
 }
 
-export function resetCar(car: CarBody): void {
+/** Place car on starting grid. index 0 = pole. */
+export function placeOnGrid(car: CarBody, index: number): void {
+  // Start line near +X, facing counterclockwise (toward +Z initially?)
+  // Oval: progress increases when going counterclockwise from atan2.
+  // Heading 0 means move along +z (sin0=0, cos0=1 for our model: x+=sin h, z+=cos h)
+  // At (TRACK_RADIUS, 0), heading should be PI/2 to go toward +Z... wait:
+  // pos update: x += sin(heading)*v*dt, z += cos(heading)*v*dt
+  // At start (46, 0), to go counterclockwise (toward positive Z first?)
+  // From (r,0) counterclockwise goes toward (r*cos(-dt), r*sin(-dt)) wait.
+  // atan2(z,x): at (46,0) angle=0. Moving counterclockwise increases angle → need +z then -x.
+  // heading such that velocity points to +z at start: sin(h)*v for x, cos(h)*v for z → want x'≈0, z'>0 → heading=0.
+  // Yes heading 0 at (46,0) moves +z, angle increases. Good.
+
+  const lane = index % 2; // 0 outer-ish, 1 inner
+  const row = Math.floor(index / 2);
+  const radius = TRACK_RADIUS - 1.2 - lane * 2.4;
+  const back = row * 4.2;
+  // Slightly behind start line along the track (negative angle)
+  const ang = -back / radius;
+  car.x = radius * Math.cos(ang);
+  car.z = radius * Math.sin(ang);
+  car.heading = ang; // tangent for counterclockwise
   car.v = 0;
-  car.heading = 0;
   car.steer = 0;
-  car.x = 41 + Math.random() * 10;
-  car.z = -Math.random() * 10;
-  car.progress = 0;
-  car.lastAng = Math.atan2(car.z, car.x);
-  car.laps = 0;
-  car.best = 0;
-  car.lapStart = performance.now?.() ?? Date.now();
   car.roll = 0;
   car.pitch = 0;
+  car.progress = ang; // keep continuous with lastAng
+  car.lastAng = ang;
+  car.laps = 0;
+  car.best = 0;
+  car.lapStart = Date.now();
+  car.raceStart = Date.now();
+  car.finished = false;
+  car.finishPlace = 0;
+  car.totalTime = 0;
+}
+
+export function resetCar(car: CarBody, gridIndex = 0): void {
+  placeOnGrid(car, gridIndex);
 }
 
 /**
@@ -66,6 +102,14 @@ export function resetCar(car: CarBody): void {
  * Returns true if a new lap was completed.
  */
 export function stepCar(car: CarBody, input: InputState, dt: number, now = Date.now()): boolean {
+  if (car.finished) {
+    car.v *= 0.96;
+    if (Math.abs(car.v) < 0.3) car.v = 0;
+    car.x += Math.sin(car.heading) * car.v * dt;
+    car.z += Math.cos(car.heading) * car.v * dt;
+    return false;
+  }
+
   const v0 = car.v;
   let a = 0;
 
@@ -83,7 +127,7 @@ export function stepCar(car: CarBody, input: InputState, dt: number, now = Date.
   const aLong = (car.v - v0) / (dt || 1e-6);
 
   const dir = (input.left ? 1 : 0) - (input.right ? 1 : 0);
-  const maxS = Math.min(0.55, Math.atan(18 * WB / (car.v * car.v + 1)));
+  const maxS = Math.min(0.55, Math.atan((18 * WB) / (car.v * car.v + 1)));
   car.steer += (dir * maxS - car.steer) * Math.min(1, (dir ? 6 : 9) * dt);
   const t = Math.tan(car.steer);
 
@@ -91,7 +135,7 @@ export function stepCar(car: CarBody, input: InputState, dt: number, now = Date.
   car.x += Math.sin(car.heading) * car.v * dt;
   car.z += Math.cos(car.heading) * car.v * dt;
 
-  const aLat = (car.v * car.v / WB) * t;
+  const aLat = ((car.v * car.v) / WB) * t;
   car.roll += (clamp(aLat * 0.004, -0.06, 0.06) - car.roll) * Math.min(1, 8 * dt);
   car.pitch += (clamp(-aLong * 0.004, -0.05, 0.05) - car.pitch) * Math.min(1, 8 * dt);
 
@@ -120,6 +164,7 @@ function clamp(v: number, lo: number, hi: number) {
 
 /** Simple circle collision between two cars */
 export function resolveCollision(a: CarBody, b: CarBody, radius = 2.3): void {
+  if (a.finished && b.finished) return;
   const dx = a.x - b.x;
   const dz = a.z - b.z;
   const dd = Math.hypot(dx, dz);

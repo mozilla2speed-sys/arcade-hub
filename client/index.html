@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Arcade Hub</title>
+  <style>
+    :root {
+      --panel: rgba(12,14,18,.62);
+      --text: #f2f4f7;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      overflow: hidden;
+      background: #0c0e12;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--text);
+    }
+    canvas { display: block; }
+    #menu {
+      position: absolute; inset: 0;
+      background: linear-gradient(160deg, #0c1220 0%, #1a2233 50%, #0e1624 100%);
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      z-index: 20; text-align: center; padding: 24px;
+    }
+    #menu h1 { margin: 0 0 6px; font-size: 2.4rem; font-weight: 700; letter-spacing: -0.02em; }
+    #menu .sub { opacity: .7; margin-bottom: 28px; }
+    .card {
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 16px;
+      padding: 24px 28px;
+      width: min(360px, 100%);
+    }
+    .card label { display: block; text-align: left; font-size: 13px; opacity: .7; margin-bottom: 4px; }
+    .card input {
+      width: 100%; padding: 11px 14px; border-radius: 10px;
+      border: 1px solid #3a4150; background: #12161e; color: var(--text);
+      font-size: 16px; margin-bottom: 14px;
+    }
+    .card input:focus { outline: 2px solid #4a9eff; outline-offset: 1px; }
+    .btns { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btns button {
+      flex: 1; padding: 12px 16px; border-radius: 10px; border: 0;
+      font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .btn-primary { background: #c1121f; color: #fff; }
+    .btn-secondary { background: #2a3344; color: #e8ecf4; }
+    .btn-primary:hover { background: #e01a28; }
+    .btn-secondary:hover { background: #3a4558; }
+    #status { margin-top: 14px; font-size: 13px; opacity: .6; min-height: 1.2em; }
+    #hud {
+      position: absolute; left: 16px; bottom: 16px;
+      background: var(--panel); border-radius: 10px;
+      padding: 10px 16px; pointer-events: none;
+      backdrop-filter: blur(6px); display: none;
+    }
+    #speed { font-size: 2.4rem; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
+    #speed small { font-size: 1rem; font-weight: 400; opacity: .75; margin-left: 4px; }
+    #keys {
+      position: absolute; top: 16px; left: 16px;
+      background: var(--panel); border-radius: 10px;
+      padding: 10px 14px; font-size: 13px; line-height: 1.55;
+      pointer-events: none; backdrop-filter: blur(6px); display: none;
+    }
+    #players {
+      position: absolute; top: 16px; right: 16px; min-width: 200px;
+      background: var(--panel); border-radius: 10px;
+      padding: 10px 14px; font-size: 13px; line-height: 1.55;
+      pointer-events: none; backdrop-filter: blur(6px); display: none;
+    }
+    #back {
+      position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+      background: var(--panel); border: 0; color: var(--text);
+      padding: 8px 16px; border-radius: 8px; cursor: pointer;
+      font-size: 13px; display: none; z-index: 15;
+    }
+  </style>
+</head>
+<body>
+  <div id="menu">
+    <h1>Arcade Hub</h1>
+    <p class="sub">Гонки и другие игры с друзьями и незнакомцами</p>
+    <div class="card">
+      <label for="nick">Ваш ник</label>
+      <input id="nick" maxlength="14" placeholder="Гонщик" autocomplete="off">
+      <label for="code">Код комнаты (для друзей)</label>
+      <input id="code" maxlength="20" placeholder="garage" value="garage" autocomplete="off">
+      <div class="btns">
+        <button class="btn-primary" id="joinCode">Войти в комнату</button>
+        <button class="btn-secondary" id="quick">Быстрая игра</button>
+      </div>
+      <div id="status"></div>
+    </div>
+  </div>
+
+  <div id="keys">
+    <b>W / ↑</b> газ &nbsp; <b>S / ↓</b> тормоз и назад<br>
+    <b>A / ←</b> влево &nbsp; <b>D / →</b> вправо<br>
+    <b>Пробел</b> ручник &nbsp; <b>R</b> сброс (локально)
+  </div>
+  <div id="hud">
+    <div id="speed">0<small>км/ч</small></div>
+    <div id="lap" style="margin-top:6px;font-size:13px;opacity:.85"></div>
+  </div>
+  <div id="players"></div>
+  <button id="back">← Меню</button>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

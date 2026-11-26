@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <title>Arcade Hub</title>
   <style>
     :root {
@@ -16,6 +16,9 @@
       background: #0c0e12;
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       color: var(--text);
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
     }
     canvas { display: block; }
     #menu {
@@ -24,6 +27,7 @@
       display: flex; flex-direction: column;
       justify-content: center; align-items: center;
       z-index: 20; text-align: center; padding: 24px;
+      touch-action: auto;
     }
     #menu h1 { margin: 0 0 6px; font-size: 2.4rem; font-weight: 700; letter-spacing: -0.02em; }
     #menu .sub { opacity: .7; margin-bottom: 28px; }
@@ -48,14 +52,12 @@
     }
     .btn-primary { background: #c1121f; color: #fff; }
     .btn-secondary { background: #2a3344; color: #e8ecf4; }
-    .btn-primary:hover { background: #e01a28; }
-    .btn-secondary:hover { background: #3a4558; }
     #status { margin-top: 14px; font-size: 13px; opacity: .6; min-height: 1.2em; }
     #hud {
       position: absolute; left: 16px; bottom: 16px;
       background: var(--panel); border-radius: 10px;
       padding: 10px 16px; pointer-events: none;
-      backdrop-filter: blur(6px); display: none;
+      backdrop-filter: blur(6px); display: none; z-index: 5;
     }
     #speed { font-size: 2.4rem; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
     #speed small { font-size: 1rem; font-weight: 400; opacity: .75; margin-left: 4px; }
@@ -63,19 +65,105 @@
       position: absolute; top: 16px; left: 16px;
       background: var(--panel); border-radius: 10px;
       padding: 10px 14px; font-size: 13px; line-height: 1.55;
-      pointer-events: none; backdrop-filter: blur(6px); display: none;
+      pointer-events: none; backdrop-filter: blur(6px); display: none; z-index: 5;
     }
     #players {
       position: absolute; top: 16px; right: 16px; min-width: 200px;
       background: var(--panel); border-radius: 10px;
       padding: 10px 14px; font-size: 13px; line-height: 1.55;
-      pointer-events: none; backdrop-filter: blur(6px); display: none;
+      pointer-events: none; backdrop-filter: blur(6px); display: none; z-index: 5;
     }
     #back {
       position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
       background: var(--panel); border: 0; color: var(--text);
       padding: 8px 16px; border-radius: 8px; cursor: pointer;
       font-size: 13px; display: none; z-index: 15;
+    }
+    #overlay {
+      position: absolute; inset: 0; display: none;
+      justify-content: center; align-items: center;
+      z-index: 12; pointer-events: none;
+      background: rgba(0,0,0,.25);
+    }
+    #overlay.show { display: flex; }
+    #overlayText {
+      font-size: clamp(3rem, 12vw, 6rem);
+      font-weight: 800;
+      text-shadow: 0 4px 24px rgba(0,0,0,.5);
+      letter-spacing: 0.04em;
+    }
+    #results {
+      position: absolute; inset: 0; display: none;
+      justify-content: center; align-items: center;
+      z-index: 14; background: rgba(8,10,16,.78);
+      backdrop-filter: blur(8px);
+    }
+    #results.show { display: flex; }
+    #resultsBox {
+      background: rgba(20,24,34,.95);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 16px;
+      padding: 24px 28px;
+      min-width: min(320px, 90vw);
+      text-align: center;
+    }
+    #resultsBox h2 { margin: 0 0 16px; font-size: 1.4rem; }
+    #resultsList { text-align: left; line-height: 1.8; font-size: 15px; }
+    #resultsList .place1 { color: #ffd700; font-weight: 700; }
+    #resultsList .place2 { color: #c0c0c0; }
+    #resultsList .place3 { color: #cd7f32; }
+
+    /* Mobile controls */
+    #mobile {
+      display: none;
+      position: absolute; inset: 0;
+      pointer-events: none;
+      z-index: 8;
+    }
+    #mobile.show { display: block; }
+    .stick-zone {
+      position: absolute; left: 12px; bottom: 24px;
+      width: 140px; height: 140px;
+      pointer-events: auto;
+    }
+    .stick-base {
+      position: absolute; inset: 20px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.12);
+      border: 2px solid rgba(255,255,255,.2);
+    }
+    .stick-knob {
+      position: absolute; width: 56px; height: 56px;
+      left: 50%; top: 50%; margin: -28px 0 0 -28px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.35);
+      border: 2px solid rgba(255,255,255,.5);
+      transition: background .1s;
+    }
+    .pedals {
+      position: absolute; right: 16px; bottom: 28px;
+      display: flex; flex-direction: column; gap: 12px;
+      pointer-events: auto;
+    }
+    .pedal {
+      width: 72px; height: 72px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.25);
+      background: rgba(255,255,255,.12);
+      color: #fff; font-size: 13px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .pedal:active, .pedal.on {
+      background: rgba(193,18,31,.7);
+      border-color: rgba(255,255,255,.5);
+    }
+    .pedal.brake.on { background: rgba(40,40,50,.85); }
+
+    @media (max-width: 900px), (pointer: coarse) {
+      #keys { display: none !important; }
+      #mobile.show { display: block; }
+      #hud { bottom: 180px; left: 12px; }
+      #players { font-size: 12px; max-width: 42vw; }
     }
   </style>
 </head>
@@ -99,7 +187,7 @@
   <div id="keys">
     <b>W / ↑</b> газ &nbsp; <b>S / ↓</b> тормоз и назад<br>
     <b>A / ←</b> влево &nbsp; <b>D / →</b> вправо<br>
-    <b>Пробел</b> ручник &nbsp; <b>R</b> сброс (локально)
+    <b>Пробел</b> ручник
   </div>
   <div id="hud">
     <div id="speed">0<small>км/ч</small></div>
@@ -107,6 +195,26 @@
   </div>
   <div id="players"></div>
   <button id="back">← Меню</button>
+
+  <div id="overlay"><div id="overlayText"></div></div>
+  <div id="results">
+    <div id="resultsBox">
+      <h2>Финиш</h2>
+      <div id="resultsList"></div>
+      <p style="opacity:.6;font-size:13px;margin:16px 0 0">Следующий заезд скоро…</p>
+    </div>
+  </div>
+
+  <div id="mobile">
+    <div class="stick-zone" id="stickZone">
+      <div class="stick-base"></div>
+      <div class="stick-knob" id="stickKnob"></div>
+    </div>
+    <div class="pedals">
+      <button class="pedal" id="btnGas" type="button">ГАЗ</button>
+      <button class="pedal brake" id="btnBrake" type="button">ТОРМОЗ</button>
+    </div>
+  </div>
 
   <script type="module" src="/src/main.ts"></script>
 </body>

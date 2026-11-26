@@ -13,6 +13,16 @@ const keysEl = document.getElementById('keys')!;
 const hudEl = document.getElementById('hud')!;
 const playersEl = document.getElementById('players')!;
 
+// Restore saved fields (frontend only — server never stores accounts)
+try {
+  const savedNick = localStorage.getItem('arcade_nick');
+  const savedCode = localStorage.getItem('arcade_code');
+  if (savedNick) nickInput.value = savedNick;
+  if (savedCode) codeInput.value = savedCode;
+} catch {
+  /* private mode / blocked storage */
+}
+
 let net: NetClient | null = null;
 let game: CarGame | null = null;
 
@@ -28,9 +38,19 @@ function showGameUI(show: boolean) {
   backBtn.style.display = show ? 'block' : 'none';
 }
 
+function saveFields(nick: string, code: string) {
+  try {
+    localStorage.setItem('arcade_nick', nick);
+    localStorage.setItem('arcade_code', code);
+  } catch {
+    /* ignore */
+  }
+}
+
 async function start(quick: boolean) {
   const nick = nickInput.value.trim() || 'Гонщик';
   const code = codeInput.value.trim().toLowerCase() || 'garage';
+  saveFields(nick, code);
 
   setStatus('Подключение…');
   joinBtn.setAttribute('disabled', 'true');
@@ -97,8 +117,7 @@ backBtn.addEventListener('click', () => {
   setStatus('');
 });
 
-// Enter key
-[nickInput, codeInput].forEach(el => {
+[nickInput, codeInput].forEach((el) => {
   el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') start(false);
   });

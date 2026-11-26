@@ -9,7 +9,7 @@ import {
   resolveCollision,
   resetCar,
 } from '../../../../shared/src/games/car/physics.js';
-import { BaseRoom, type PlayerSocket } from '../../rooms/RoomManager.js';
+import { BaseRoom, type PlayerSocket } from '../../rooms/BaseRoom.js';
 
 interface CarPlayer {
   socket: PlayerSocket;
@@ -37,12 +37,10 @@ export class CarRoom extends BaseRoom {
     const now = Date.now();
     const list = [...this.cars.values()];
 
-    // Physics step
     for (const cp of list) {
       stepCar(cp.body, cp.socket.lastInput, dt, now);
     }
 
-    // Pairwise collisions (simple)
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         resolveCollision(list[i].body, list[j].body);
@@ -51,7 +49,7 @@ export class CarRoom extends BaseRoom {
     }
   }
 
-  getStateFor(p: PlayerSocket): ServerMessage {
+  getStateFor(_p: PlayerSocket): ServerMessage {
     const cars: CarState[] = [];
     for (const [id, cp] of this.cars) {
       const b = cp.body;

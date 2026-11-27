@@ -50,6 +50,7 @@ export class CarGame {
   private phase: RacePhase = 'lobby';
   private totalLaps = 3;
   private lastServerTick = 0;
+  private lowPower = false;
 
   private speedEl = document.getElementById('speed')!;
   private lapEl = document.getElementById('lap')!;
@@ -63,19 +64,37 @@ export class CarGame {
   private sun!: THREE.DirectionalLight;
   private unsubTouch: (() => void) | null = null;
 
+  private fpsFrames = 0;
+  private fpsAcc = 0;
+  private fpsChecked = false;
+
   constructor(net: NetClient, myId: string, roomCode: string, players: PlayerInfo[]) {
     this.net = net;
     this.myId = myId;
     this.roomCode = roomCode;
     this.myHue = players.find((p) => p.id === myId)?.colorHue ?? Math.random();
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    const cores = navigator.hardwareConcurrency || 4;
+    const mem = (navigator as any).deviceMemory as number | undefined;
+    const coarse = matchMedia('(pointer: coarse)').matches;
+    const saveData = (navigator as any).connection?.saveData === true;
+    this.lowPower =
+      saveData ||
+      (mem !== undefined && mem <= 4) ||
+      (cores <= 4 && coarse) ||
+      innerWidth * devicePixelRatio < 900;
+
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: !this.lowPower,
+      powerPreference: this.lowPower ? 'low-power' : 'high-performance',
+    });
+    const pr = this.lowPower ? Math.min(devicePixelRatio, 1.25) : Math.min(devicePixelRatio, 2);
+    this.renderer.setPixelRatio(pr);
     this.renderer.setSize(innerWidth, innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.1;
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.enabled = !this.lowPower;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     document.body.appendChild(this.renderer.domElement);
 
@@ -267,6 +286,19 @@ export class CarGame {
           (this.pred.best ? ` · лучший ${this.pred.best.toFixed(1)} с` : '');
 
     this.renderer.render(this.scene, this.camera);
+
+    if (!this.fpsChecked) {
+      this.fpsFrames++;
+      this.fpsAcc += dt;
+      if (this.fpsFrames >= 90) {
+        this.fpsChecked = true;
+        const fps = this.fpsFrames / this.fpsAcc;
+        if (fps < 28 && this.renderer.getPixelRatio() > 1) {
+          this.renderer.setPixelRatio(1);
+          this.renderer.shadowMap.enabled = false;
+        }
+      }
+    }
   };
 
   private updateOverlay(phase: RacePhase, countdown?: number) {
@@ -471,8 +503,9 @@ export class CarGame {
   private setupLights() {
     this.scene.add(new THREE.HemisphereLight(0xbfdcff, 0x3a5a30, 0.45));
     this.sun = new THREE.DirectionalLight(0xfff1d6, 1.1);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.castShadow = !this.lowPower;
+    const map = this.lowPower ? 512 : 2048;
+    this.sun.shadow.mapSize.set(map, map);
     Object.assign(this.sun.shadow.camera, { left: -25, right: 25, top: 25, bottom: -25, near: 1, far: 120 });
     this.sun.shadow.bias = -0.0004;
     this.scene.add(this.sun, this.sun.target);
@@ -496,7 +529,7 @@ export class CarGame {
     flat(new THREE.RingGeometry(38, 54, 128), 0x2b2c30, 0.03);
     flat(new THREE.RingGeometry(38.2, 38.5, 128), 0xe8e8e8, 0.05);
     flat(new THREE.RingGeometry(53.5, 53.8, 128), 0xe8e8e8, 0.05);
-    const N = 120;
+    const N = this.lowPower ? 48 : 120;
     const trunks = new THREE.InstancedMesh(
       new THREE.CylinderGeometry(0.25, 0.35, 2, 6),
       new THREE.MeshStandardMaterial({ color: 0x5b3a22 }),
@@ -524,7 +557,7 @@ export class CarGame {
       d.updateMatrix();
       crowns.setMatrixAt(i, d.matrix);
     }
-    trunks.castShadow = crowns.castShadow = true;
+    trunks.castShadow = crowns.castShadow = !this.lowPower;
     this.scene.add(trunks, crowns);
     return ground;
   }

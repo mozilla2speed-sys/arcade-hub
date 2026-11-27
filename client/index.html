@@ -3,6 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0c1220">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Arcade Hub">
+  <meta name="description" content="Мультиплеерные гонки и аркады с друзьями">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon.svg">
   <title>Arcade Hub</title>
   <style>
     :root {
@@ -52,7 +61,18 @@
     }
     .btn-primary { background: #c1121f; color: #fff; }
     .btn-secondary { background: #2a3344; color: #e8ecf4; }
+    .btn-ghost {
+      background: transparent; color: #a8b0c0;
+      border: 1px solid #3a4150 !important;
+      margin-top: 10px; width: 100%;
+    }
     #status { margin-top: 14px; font-size: 13px; opacity: .6; min-height: 1.2em; }
+    #installBtn {
+      display: none; margin-top: 12px; width: 100%;
+      padding: 10px 16px; border-radius: 10px; border: 1px solid #4a9eff;
+      background: rgba(74,158,255,.12); color: #cfe3ff;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
     #hud {
       position: absolute; left: 16px; bottom: 16px;
       background: var(--panel); border-radius: 10px;
@@ -77,6 +97,12 @@
       position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
       background: var(--panel); border: 0; color: var(--text);
       padding: 8px 16px; border-radius: 8px; cursor: pointer;
+      font-size: 13px; display: none; z-index: 15;
+    }
+    #copyLink {
+      position: absolute; top: 16px; left: calc(50% + 70px);
+      background: var(--panel); border: 0; color: var(--text);
+      padding: 8px 14px; border-radius: 8px; cursor: pointer;
       font-size: 13px; display: none; z-index: 15;
     }
     #overlay {
@@ -113,7 +139,6 @@
     #resultsList .place2 { color: #c0c0c0; }
     #resultsList .place3 { color: #cd7f32; }
 
-    /* Mobile controls */
     #mobile {
       display: none;
       position: absolute; inset: 0;
@@ -138,7 +163,6 @@
       border-radius: 50%;
       background: rgba(255,255,255,.35);
       border: 2px solid rgba(255,255,255,.5);
-      transition: background .1s;
     }
     .pedals {
       position: absolute; right: 16px; bottom: 28px;
@@ -164,6 +188,8 @@
       #mobile.show { display: block; }
       #hud { bottom: 180px; left: 12px; }
       #players { font-size: 12px; max-width: 42vw; }
+      #copyLink { left: auto; right: 12px; top: auto; bottom: 12px; transform: none; }
+      #back { top: 12px; }
     }
   </style>
 </head>
@@ -180,6 +206,8 @@
         <button class="btn-primary" id="joinCode">Войти в комнату</button>
         <button class="btn-secondary" id="quick">Быстрая игра</button>
       </div>
+      <button class="btn-ghost" id="shareMenu" type="button">Скопировать ссылку на комнату</button>
+      <button id="installBtn" type="button">Установить приложение</button>
       <div id="status"></div>
     </div>
   </div>
@@ -195,6 +223,7 @@
   </div>
   <div id="players"></div>
   <button id="back">← Меню</button>
+  <button id="copyLink">Ссылка</button>
 
   <div id="overlay"><div id="overlayText"></div></div>
   <div id="results">

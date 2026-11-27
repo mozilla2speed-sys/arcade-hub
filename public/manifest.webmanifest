@@ -1,0 +1,25 @@
+{
+  "name": "Arcade Hub",
+  "short_name": "Arcade Hub",
+  "description": "Мультиплеерные гонки и аркады с друзьями",
+  "start_url": "/?source=pwa",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c0e12",
+  "theme_color": "#0c1220",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

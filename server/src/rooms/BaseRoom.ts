@@ -31,6 +31,8 @@ export abstract class BaseRoom {
   players = new Map<string, PlayerSocket>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   tickCount = 0;
+  /** true: created by quick play, so strangers may be matched into it */
+  isPublic = false;
 
   constructor(code: string, game: GameId) {
     this.code = code;

@@ -70,14 +70,16 @@ export class RoomManager {
 
     if (msg.quick) {
       for (const r of this.rooms.values()) {
-        if (r.game === game && r.players.size < MAX_PLAYERS_PER_ROOM) {
+        if (r.isPublic && r.game === game && r.players.size < MAX_PLAYERS_PER_ROOM) {
           room = r;
           break;
         }
       }
       if (!room) {
-        const code = generateCode();
+        let code = generateCode();
+        while (this.rooms.has(code)) code = generateCode();
         room = this.createRoom(code, game);
+        room.isPublic = true;
       }
     } else {
       const code =

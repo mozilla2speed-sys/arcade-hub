@@ -1,6 +1,6 @@
 import { connect, type NetClient } from './net.js';
 import { CarGame } from './games/car/CarGame.js';
-import type { GameId } from '../../shared/src/messages.js';
+import type { GameId, ServerMessage } from '../../shared/src/messages.js';
 
 const menu = document.getElementById('menu')!;
 const statusEl = document.getElementById('status')!;
@@ -34,6 +34,7 @@ if (urlCode) {
 }
 
 let net: NetClient | null = null;
+let connecting = false;
 let game: CarGame | null = null;
 let currentRoomCode = '';
 
@@ -48,6 +49,20 @@ function showGameUI(show: boolean) {
   playersEl.style.display = show ? 'block' : 'none';
   backBtn.style.display = show ? 'block' : 'none';
   copyLinkBtn.style.display = show ? 'block' : 'none';
+}
+
+function setJoinButtons(enabled: boolean) {
+  for (const btn of [joinBtn, quickBtn]) {
+    if (enabled) btn.removeAttribute('disabled');
+    else btn.setAttribute('disabled', 'true');
+  }
+}
+
+/** Close the connection on purpose: its close event must not look like a lost one. */
+function disconnect() {
+  if (!net) return;
+  net.close();
+  net = null;
 }
 
 function saveFields(nick: string, code: string) {
@@ -98,53 +113,25 @@ copyLinkBtn.addEventListener('click', () => {
 });
 
 async function start(quick: boolean) {
+  // Enter in an input bypasses the disabled buttons
+  if (connecting || net) return;
   const nick = nickInput.value.trim() || 'Гонщик';
   const code = codeInput.value.trim().toLowerCase() || 'garage';
   saveFields(nick, code);
 
   setStatus('Подключение…');
-  joinBtn.setAttribute('disabled', 'true');
-  quickBtn.setAttribute('disabled', 'true');
+  setJoinButtons(false);
+  connecting = true;
 
   try {
-    net = await connect();
+    net = await connect({ onMessage: handleMessage, onClose: handleConnectionLost });
   } catch {
     setStatus('Не удалось подключиться к серверу');
-    joinBtn.removeAttribute('disabled');
-    quickBtn.removeAttribute('disabled');
+    setJoinButtons(true);
     return;
+  } finally {
+    connecting = false;
   }
-
-  net.onMessage = (msg) => {
-    if (msg.type === 'welcome') {
-      setStatus('');
-      currentRoomCode = msg.roomCode;
-      // reflect real room in URL without reload
-      try {
-        const u = new URL(location.href);
-        u.searchParams.set('code', msg.roomCode);
-        history.replaceState(null, '', u.toString());
-      } catch {
-        /* ignore */
-      }
-      showGameUI(true);
-      if (msg.game === 'car') {
-        game = new CarGame(net!, msg.playerId, msg.roomCode, msg.players);
-        game.start();
-      }
-    } else if (msg.type === 'error') {
-      setStatus(msg.message);
-    } else if (msg.type === 'room_full') {
-      setStatus('Комната заполнена');
-    } else if (game) {
-      game.handleServer(msg);
-    }
-  };
-
-  net.onClose = () => {
-    setStatus('Соединение потеряно');
-    stopGame();
-  };
 
   net.send({
     type: 'join',
@@ -155,19 +142,49 @@ async function start(quick: boolean) {
   });
 }
 
+function handleMessage(msg: ServerMessage) {
+  if (msg.type === 'welcome') {
+    setStatus('');
+    currentRoomCode = msg.roomCode;
+    // reflect real room in URL without reload
+    try {
+      const u = new URL(location.href);
+      u.searchParams.set('code', msg.roomCode);
+      history.replaceState(null, '', u.toString());
+    } catch {
+      /* ignore */
+    }
+    showGameUI(true);
+    if (msg.game === 'car') {
+      game = new CarGame(net!, msg.playerId, msg.roomCode, msg.players);
+      game.start();
+    }
+  } else if (msg.type === 'error' || msg.type === 'room_full') {
+    setStatus(msg.type === 'error' ? msg.message : 'Комната заполнена');
+    // Join was refused: return to a usable menu
+    if (!game) {
+      disconnect();
+      setJoinButtons(true);
+    }
+  } else if (game) {
+    game.handleServer(msg);
+  }
+}
+
+function handleConnectionLost() {
+  setStatus('Соединение потеряно');
+  stopGame();
+}
+
 function stopGame() {
   if (game) {
     game.destroy();
     game = null;
   }
-  if (net) {
-    net.close();
-    net = null;
-  }
+  disconnect();
   currentRoomCode = '';
   showGameUI(false);
-  joinBtn.removeAttribute('disabled');
-  quickBtn.removeAttribute('disabled');
+  setJoinButtons(true);
 }
 
 joinBtn.addEventListener('click', () => start(false));

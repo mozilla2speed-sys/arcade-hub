@@ -3,13 +3,14 @@ import { CarRoom } from '../server/src/games/car/CarRoom.js';
 import { InputQueue } from '../server/src/rooms/InputQueue.js';
 import type { PlayerSocket } from '../server/src/rooms/BaseRoom.js';
 import type { ServerMessage } from '../shared/src/messages.js';
+import type { TrackId } from '../shared/src/games/car/tracks.js';
 import { TICK_SEC } from '../shared/src/games/car/prediction.js';
 
 /** A room driven tick by tick with a fake clock instead of timers. */
-export function makeRoom(t: TestContext) {
+export function makeRoom(t: TestContext, map: TrackId = 'ring') {
   let now = 1_000_000;
   t.mock.method(Date, 'now', () => now);
-  const room = new CarRoom('test');
+  const room = new CarRoom('test', map);
   const inbox = new Map<string, ServerMessage[]>();
 
   const join = (id: string) => {
@@ -18,6 +19,8 @@ export function makeRoom(t: TestContext) {
       id,
       nick: id,
       colorHue: 0,
+      car: 'sedan',
+      color: 0,
       room: null,
       inputs: new InputQueue(),
       ws: { readyState: 1, send: (s: string) => inbox.get(id)!.push(JSON.parse(s)) },

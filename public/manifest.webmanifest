@@ -1,12 +1,12 @@
 {
-  "name": "Arcade Hub",
-  "short_name": "Arcade Hub",
-  "description": "Мультиплеерные гонки и аркады с друзьями",
+  "name": "Turbo Poyga",
+  "short_name": "Turbo Poyga",
+  "description": "Онлайн-гонки с друзьями, до 8 игроков",
   "start_url": "/?source=pwa",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#0c0e12",
-  "theme_color": "#0c1220",
+  "background_color": "#8fd8ff",
+  "theme_color": "#0d2547",
   "lang": "ru",
   "icons": [
     {

@@ -2,13 +2,12 @@
  * Shared bicycle-model physics for the car game.
  * Used by both server (authoritative) and client (prediction / visuals).
  */
-
 import type { InputState } from '../../messages.js';
+import type { CarSpec } from './cars.js';
+import { pointAt, project, wallOffset, type Track } from './tracks.js';
 
 export const R = 0.38; // wheel radius
 export const WB = 2.8; // wheelbase
-export const VMAX = 55; // m/s ≈ 198 km/h
-export const TRACK_RADIUS = 46;
 
 export interface CarBody {
   x: number;
@@ -18,8 +17,8 @@ export interface CarBody {
   steer: number;
   roll: number;
   pitch: number;
+  /** metres driven along the track since the start line (negative on the grid) */
   progress: number;
-  lastAng: number;
   laps: number;
   best: number;
   lapStart: number;
@@ -29,17 +28,16 @@ export interface CarBody {
   totalTime: number;
 }
 
-export function createCar(x = TRACK_RADIUS, z = 0): CarBody {
+export function createCar(): CarBody {
   return {
-    x,
-    z,
+    x: 0,
+    z: 0,
     heading: 0,
     v: 0,
     steer: 0,
     roll: 0,
     pitch: 0,
     progress: 0,
-    lastAng: Math.atan2(z, x),
     laps: 0,
     best: 0,
     lapStart: Date.now(),
@@ -50,70 +48,51 @@ export function createCar(x = TRACK_RADIUS, z = 0): CarBody {
   };
 }
 
-/** Place car on starting grid. index 0 = pole. */
-export function placeOnGrid(car: CarBody, index: number): void {
-  // Start line near +X, facing counterclockwise (toward +Z initially?)
-  // Oval: progress increases when going counterclockwise from atan2.
-  // Heading 0 means move along +z (sin0=0, cos0=1 for our model: x+=sin h, z+=cos h)
-  // At (TRACK_RADIUS, 0), heading should be PI/2 to go toward +Z... wait:
-  // pos update: x += sin(heading)*v*dt, z += cos(heading)*v*dt
-  // At start (46, 0), to go counterclockwise (toward positive Z first?)
-  // From (r,0) counterclockwise goes toward (r*cos(-dt), r*sin(-dt)) wait.
-  // atan2(z,x): at (46,0) angle=0. Moving counterclockwise increases angle → need +z then -x.
-  // heading such that velocity points to +z at start: sin(h)*v for x, cos(h)*v for z → want x'≈0, z'>0 → heading=0.
-  // Yes heading 0 at (46,0) moves +z, angle increases. Good.
-
-  const lane = index % 2; // 0 outer-ish, 1 inner
-  const row = Math.floor(index / 2);
-  const radius = TRACK_RADIUS - 1.2 - lane * 2.4;
-  const back = row * 4.2;
-  // Slightly behind start line along the track (negative angle)
-  const ang = -back / radius;
-  car.x = radius * Math.cos(ang);
-  car.z = radius * Math.sin(ang);
-  car.heading = ang; // tangent for counterclockwise
-  car.v = 0;
-  car.steer = 0;
-  car.roll = 0;
-  car.pitch = 0;
-  car.progress = ang; // keep continuous with lastAng
-  car.lastAng = ang;
-  car.laps = 0;
-  car.best = 0;
-  car.lapStart = Date.now();
-  car.raceStart = Date.now();
-  car.finished = false;
-  car.finishPlace = 0;
-  car.totalTime = 0;
-}
-
-export function resetCar(car: CarBody, gridIndex = 0): void {
-  placeOnGrid(car, gridIndex);
+/** Place car on the starting grid, two per row behind the line. index 0 = pole. */
+export function placeOnGrid(car: CarBody, track: Track, index: number): void {
+  const side = index % 2 === 0 ? 1 : -1;
+  const back = 5 + Math.floor(index / 2) * 5.5 + (index % 2) * 1.5;
+  const p = pointAt(track, -back);
+  const lateral = side * track.halfWidth * 0.4;
+  Object.assign(car, createCar(), {
+    x: p.x + p.tz * lateral,
+    z: p.z - p.tx * lateral,
+    heading: Math.atan2(p.tx, p.tz),
+    progress: -back,
+  });
 }
 
 /**
  * Advance physics by dt seconds. Mutates `car`.
  * Returns true if a new lap was completed.
  */
-export function stepCar(car: CarBody, input: InputState, dt: number, now = Date.now()): boolean {
+export function stepCar(
+  car: CarBody,
+  input: InputState,
+  dt: number,
+  track: Track,
+  spec: CarSpec,
+  now = Date.now(),
+): boolean {
   if (car.finished) {
     car.v *= 0.96;
     if (Math.abs(car.v) < 0.3) car.v = 0;
-    car.x += Math.sin(car.heading) * car.v * dt;
-    car.z += Math.cos(car.heading) * car.v * dt;
+    move(car, dt);
+    collideWithWalls(car, track);
     return false;
   }
 
   const v0 = car.v;
   let a = 0;
 
-  if (input.up) a = car.v < -0.5 ? 18 : 11 * (1 - Math.max(car.v, 0) / VMAX);
-  if (input.down) a = car.v > 0.5 ? -20 : -6 * (1 - Math.max(-car.v, 0) / 14);
+  if (input.up) a = car.v < -0.5 ? 18 : spec.accel * (1 - Math.max(car.v, 0) / spec.vmax);
+  if (input.down) a = car.v > 0.5 ? -spec.brake : -6 * (1 - Math.max(-car.v, 0) / 14);
   if (input.brake) a -= Math.sign(car.v || 1) * 22;
 
-  const rad = Math.hypot(car.x, car.z);
-  const off = rad < 37.5 || rad > 54.5;
-  a -= Math.sign(car.v || 1) * (0.8 + 0.0016 * car.v * car.v + (off ? 5 + 0.006 * car.v * car.v : 0));
+  const off = project(track, car.x, car.z, car.progress).dist > track.halfWidth;
+  const drag = 0.8 + 0.0016 * car.v * car.v;
+  const grass = off ? (5 + 0.006 * car.v * car.v) * spec.offroad : 0;
+  a -= Math.sign(car.v || 1) * (drag + grass);
 
   car.v += a * dt;
   if (!input.up && !input.down && (v0 * car.v < 0 || Math.abs(car.v) < 0.2)) car.v = 0;
@@ -121,36 +100,71 @@ export function stepCar(car: CarBody, input: InputState, dt: number, now = Date.
   const aLong = (car.v - v0) / (dt || 1e-6);
 
   const dir = (input.left ? 1 : 0) - (input.right ? 1 : 0);
-  const maxS = Math.min(0.55, Math.atan((18 * WB) / (car.v * car.v + 1)));
+  const maxS = Math.min(0.55, Math.atan((spec.grip * WB) / (car.v * car.v + 1)));
   car.steer += (dir * maxS - car.steer) * Math.min(1, (dir ? 6 : 9) * dt);
   const t = Math.tan(car.steer);
 
   car.heading += (car.v / WB) * t * dt;
-  car.x += Math.sin(car.heading) * car.v * dt;
-  car.z += Math.cos(car.heading) * car.v * dt;
+  move(car, dt);
+  const s = collideWithWalls(car, track);
 
   const aLat = ((car.v * car.v) / WB) * t;
   car.roll += (clamp(aLat * 0.004, -0.06, 0.06) - car.roll) * Math.min(1, 8 * dt);
   car.pitch += (clamp(-aLong * 0.004, -0.05, 0.05) - car.pitch) * Math.min(1, 8 * dt);
 
-  // Lap detection
-  const ang = Math.atan2(car.z, car.x);
-  let da = ang - car.lastAng;
-  if (da > Math.PI) da -= 2 * Math.PI;
-  if (da < -Math.PI) da += 2 * Math.PI;
-  car.progress += da;
-  car.lastAng = ang;
+  // Lap detection: add the signed distance moved along the centre line
+  const half = track.length / 2;
+  let ds = s - mod(car.progress, track.length);
+  if (ds > half) ds -= track.length;
+  if (ds < -half) ds += track.length;
+  car.progress += ds;
 
-  let newLap = false;
-  if (Math.floor(car.progress / (2 * Math.PI)) > car.laps) {
+  if (Math.floor(car.progress / track.length) > car.laps) {
     car.laps++;
     const tLap = (now - car.lapStart) / 1000;
     car.lapStart = now;
     if (!car.best || tLap < car.best) car.best = tLap;
-    newLap = true;
+    return true;
   }
-  return newLap;
+  return false;
 }
+
+function move(car: CarBody, dt: number) {
+  car.x += Math.sin(car.heading) * car.v * dt;
+  car.z += Math.cos(car.heading) * car.v * dt;
+}
+
+/**
+ * Keep the car inside the barriers: push it back, take speed according to how
+ * head-on the hit was, and turn the nose along the wall so it does not stick.
+ * Returns the car's distance along the lap.
+ */
+function collideWithWalls(car: CarBody, track: Track): number {
+  const p = project(track, car.x, car.z, car.progress);
+  const limit = wallOffset(track);
+  if (p.dist <= limit) return p.s;
+
+  const nx = (car.x - p.x) / p.dist;
+  const nz = (car.z - p.z) / p.dist;
+  car.x = p.x + nx * limit;
+  car.z = p.z + nz * limit;
+
+  const way = Math.sign(car.v) || 1;
+  const impact = (Math.sin(car.heading) * nx + Math.cos(car.heading) * nz) * way;
+  if (impact > 0) {
+    car.v *= 1 - 0.3 * impact;
+    const t = pointAt(track, p.s);
+    // wall direction closest to where the car is already going
+    let along = Math.atan2(t.tx, t.tz);
+    const facing = car.heading + (way < 0 ? Math.PI : 0);
+    if (Math.cos(along - facing) < 0) along += Math.PI;
+    const turn = Math.atan2(Math.sin(along - facing), Math.cos(along - facing));
+    car.heading += turn * 0.3;
+  }
+  return p.s;
+}
+
+const mod = (v: number, m: number) => ((v % m) + m) % m;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));

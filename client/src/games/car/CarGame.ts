@@ -6,13 +6,16 @@ import type {
   CarState,
   InputState,
   RacePhase,
-  RaceResultRow,
 } from '../../../../shared/src/messages.js';
+import { R, createCar, type CarBody } from '../../../../shared/src/games/car/physics.js';
+import { CAR_COLORS, getCar, type CarId, type CarSpec } from '../../../../shared/src/games/car/cars.js';
 import {
-  R,
-  createCar,
-  type CarBody,
-} from '../../../../shared/src/games/car/physics.js';
+  getTrack,
+  pointAt,
+  project,
+  type Track,
+  type TrackId,
+} from '../../../../shared/src/games/car/tracks.js';
 import {
   TICK_SEC,
   canDrive,
@@ -20,161 +23,204 @@ import {
   reconcile,
   type PendingInput,
 } from '../../../../shared/src/games/car/prediction.js';
+import type { Theme } from '../../theme.js';
+import { disposeTree, getRenderer, lowPower } from '../../render/renderer.js';
+import { buildCar, type CarModel } from '../../render/carModels.js';
+import { buildWorld, type World } from '../../render/world.js';
+import { bindControls } from './controls.js';
+import { createMinimap, type MapDot } from './minimap.js';
+import { sfx, startEngine, stopEngine, updateEngine } from './sound.js';
+import {
+  formatTime,
+  graceText,
+  hideResults,
+  raceOrder,
+  resetHud,
+  setText,
+  showBanner,
+  showOverlay,
+  showResults,
+  updateBoard,
+} from './hud.js';
 
-const SKY = 0xaed4ee;
+interface Pose {
+  x: number;
+  z: number;
+  heading: number;
+}
 
 interface RemoteCar {
-  obj: ReturnType<typeof buildCar>;
-  tag: THREE.Sprite | null;
-  name: string;
-  target: { x: number; z: number; heading: number; v: number; steer: number };
+  model: CarModel;
+  tag: THREE.Sprite;
+  color: number;
+  target: { x: number; z: number; heading: number; v: number; steer: number } | null;
+  waiting: boolean;
   spin: number;
   lastUpdate: number;
 }
 
 export class CarGame {
-  private net: NetClient;
-  private myId: string;
-  private roomCode: string;
-
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 600);
-  private renderer: THREE.WebGLRenderer;
-  private myCar: ReturnType<typeof buildCar>;
-  private myHue: number;
+  private camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 900);
+  private renderer = getRenderer();
+  private track: Track;
+  private world: World;
+  private myCar: CarModel;
+  private spec: CarSpec;
+  private myColor: number;
   private remotes = new Map<string, RemoteCar>();
 
+  private controls = bindControls();
   private keys: InputState = { up: false, down: false, left: false, right: false, brake: false };
+  private minimap: ReturnType<typeof createMinimap>;
   private seq = 0;
   private tickAcc = 0;
   private pending: PendingInput[] = [];
-  private waiting = false;
   private playing = true;
   private raf = 0;
   private clock = new THREE.Clock();
 
   private pred: CarBody = createCar();
   /** predicted state one tick ago, to interpolate between ticks */
-  private prev = { x: 46, z: 0, heading: 0 };
+  private prev: Pose = { x: 0, z: 0, heading: 0 };
   /** visual-only offset that hides server corrections, decays to zero */
-  private smooth = { x: 0, z: 0, heading: 0 };
+  private smooth: Pose = { x: 0, z: 0, heading: 0 };
   /** what is actually drawn */
-  private view = { x: 46, z: 0, heading: 0 };
-  private phase: RacePhase = 'lobby';
-  private totalLaps = 3;
-  private lowPower = false;
+  private view: Pose = { x: 0, z: 0, heading: 0 };
+  private placed = false;
 
-  private speedEl = document.getElementById('speed')!;
-  private lapEl = document.getElementById('lap')!;
-  private playersEl = document.getElementById('players')!;
-  private overlay = document.getElementById('overlay')!;
-  private overlayText = document.getElementById('overlayText')!;
-  private resultsEl = document.getElementById('results')!;
-  private resultsList = document.getElementById('resultsList')!;
-  private mobileEl = document.getElementById('mobile')!;
-  private ground!: THREE.Mesh;
-  private sun!: THREE.DirectionalLight;
-  private unsubTouch: (() => void) | null = null;
+  // last known race state
+  private phase: RacePhase = 'lobby';
+  private waiting = false;
+  private totalLaps: number;
+  private lapTime = 0;
+  private place = 1;
+  private racers = 1;
+  private countdownShown = 0;
+  private goUntil = 0;
+  private graceLeft: number | undefined;
+  private lapsSeen = 0;
+  private wasFinished = false;
+  private wrongWayFor = 0;
 
   private fpsFrames = 0;
   private fpsAcc = 0;
   private fpsChecked = false;
 
-  constructor(net: NetClient, myId: string, roomCode: string, players: PlayerInfo[]) {
-    this.net = net;
-    this.myId = myId;
-    this.roomCode = roomCode;
-    this.myHue = players.find((p) => p.id === myId)?.colorHue ?? Math.random();
+  constructor(
+    private net: NetClient,
+    private myId: string,
+    private roomCode: string,
+    mapId: TrackId,
+    players: PlayerInfo[],
+    theme: Theme,
+  ) {
+    this.track = getTrack(mapId);
+    this.totalLaps = this.track.laps;
+    this.world = buildWorld(this.track, theme);
+    this.scene.background = this.world.background;
+    this.scene.fog = this.world.fog;
+    this.scene.add(this.world.group);
 
-    const cores = navigator.hardwareConcurrency || 4;
-    const mem = (navigator as any).deviceMemory as number | undefined;
-    const coarse = matchMedia('(pointer: coarse)').matches;
-    const saveData = (navigator as any).connection?.saveData === true;
-    this.lowPower =
-      saveData ||
-      (mem !== undefined && mem <= 4) ||
-      (cores <= 4 && coarse) ||
-      innerWidth * devicePixelRatio < 900;
-
-    this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.lowPower,
-      powerPreference: this.lowPower ? 'low-power' : 'high-performance',
-    });
-    const pr = this.lowPower ? Math.min(devicePixelRatio, 1.25) : Math.min(devicePixelRatio, 2);
-    this.renderer.setPixelRatio(pr);
-    this.renderer.setSize(innerWidth, innerHeight);
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
-    this.renderer.shadowMap.enabled = !this.lowPower;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    document.body.appendChild(this.renderer.domElement);
-
-    this.scene.background = new THREE.Color(SKY);
-    this.scene.fog = new THREE.Fog(SKY, 50, 280);
-
-    this.setupLights();
-    this.ground = this.setupWorld();
-    this.myCar = buildCar(hex(this.myHue));
-    this.myCar.car.position.set(46, 0, 0);
+    const me = players.find((p) => p.id === myId);
+    const carId: CarId = me?.car ?? 'sedan';
+    this.spec = getCar(carId);
+    this.myColor = me?.color ?? 0;
+    this.myCar = buildCar(carId, paintOf(this.myColor));
+    this.myCar.car.visible = false;
     this.scene.add(this.myCar.car);
 
     for (const p of players) {
-      if (p.id !== myId) this.spawnRemote(p.id, p.nick, p.colorHue);
+      if (p.id !== myId) this.spawnRemote(p.id, p.nick, p.car, p.color);
     }
 
-    this.bindInput();
-    this.bindMobile();
+    this.minimap = createMinimap(document.getElementById('minimap') as HTMLCanvasElement, this.track);
+    resetHud();
+    setText('trackName', this.track.name);
     addEventListener('resize', this.onResize);
+    this.onResize();
   }
 
   start() {
+    startEngine();
     this.raf = requestAnimationFrame(this.loop);
   }
 
   destroy() {
     this.playing = false;
     cancelAnimationFrame(this.raf);
-    removeEventListener('keydown', this.onKeyDown);
-    removeEventListener('keyup', this.onKeyUp);
     removeEventListener('resize', this.onResize);
-    this.unsubTouch?.();
-    this.mobileEl.classList.remove('show');
-    this.overlay.classList.remove('show');
-    this.resultsEl.classList.remove('show');
-    this.renderer.domElement.remove();
-    this.renderer.dispose();
+    this.controls.destroy();
+    stopEngine();
+    resetHud();
+    disposeTree(this.scene);
   }
 
   handleServer(msg: ServerMessage) {
     if (msg.type === 'player_joined') {
-      if (msg.player.id !== this.myId) {
-        this.spawnRemote(msg.player.id, msg.player.nick, msg.player.colorHue);
-      }
+      const p = msg.player;
+      if (p.id !== this.myId) this.spawnRemote(p.id, p.nick, p.car, p.color);
     } else if (msg.type === 'player_left') {
-      const r = this.remotes.get(msg.playerId);
-      if (r) {
-        this.scene.remove(r.obj.car);
-        this.remotes.delete(msg.playerId);
-      }
+      this.removeRemote(msg.playerId);
     } else if (msg.type === 'state') {
-      this.phase = msg.phase;
+      const me = msg.cars.find((c) => c.id === this.myId);
+      this.updatePhase(msg.phase, msg.countdown);
       this.totalLaps = msg.totalLaps;
-      this.waiting = msg.cars.find((c) => c.id === this.myId)?.waiting ?? false;
-      this.updateOverlay(msg.phase, msg.countdown);
+      this.graceLeft = msg.graceLeft;
+      this.waiting = me?.waiting ?? false;
       for (const c of msg.cars) {
         if (c.id === this.myId) this.applyOwn(c, msg.ack);
         else this.applyRemote(c);
       }
-      this.updateLeaderboard(msg.cars);
+      const order = raceOrder(msg.cars);
+      this.racers = Math.max(1, order.filter((c) => !c.waiting).length);
+      this.place = order.findIndex((c) => c.id === this.myId) + 1;
+      updateBoard(order, this.myId, this.roomCode, this.totalLaps);
+      setText('nextRace', msg.nextRaceIn !== undefined ? `Следующий заезд через ${msg.nextRaceIn} с` : '');
     } else if (msg.type === 'race_result') {
-      this.showResults(msg.results);
+      showOverlay('');
+      showBanner('');
+      showResults(msg.results, this.myId);
     }
+  }
+
+  private updatePhase(phase: RacePhase, countdown?: number) {
+    const before = this.phase;
+    this.phase = phase;
+    if (phase === 'lobby' || phase === 'countdown') {
+      hideResults();
+      this.lapsSeen = 0;
+      this.wasFinished = false;
+    }
+    if (phase === 'countdown' && countdown) {
+      if (countdown !== this.countdownShown) sfx.countdown();
+      this.countdownShown = countdown;
+      showOverlay(String(countdown));
+    } else if (phase === 'lobby') {
+      showOverlay(this.track.name, `${lapsText(this.track.laps)} · гонка скоро начнётся`);
+    } else if (phase === 'racing') {
+      if (before === 'countdown') {
+        this.goUntil = performance.now() + 1000;
+        sfx.go();
+        showOverlay('СТАРТ!');
+      } else if (performance.now() > this.goUntil) {
+        showOverlay('');
+      }
+    } else if (phase === 'finished') {
+      showOverlay('');
+    }
+    if (phase !== 'countdown') this.countdownShown = 0;
   }
 
   private applyOwn(c: CarState, ack: number) {
     const before = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
-    this.pending = reconcile(this.pred, c, this.phase, this.totalLaps, ack, this.pending);
+    this.pending = reconcile(this.pred, c, this.track, this.spec, this.phase, ack, this.pending);
+    this.lapTime = c.lapTime;
+
+    if (c.finished && !this.wasFinished && this.phase !== 'lobby') sfx.finish();
+    else if (c.laps > this.lapsSeen && !c.finished) sfx.lap();
+    this.wasFinished = c.finished;
+    this.lapsSeen = c.laps;
 
     const dx = before.x - this.pred.x;
     const dz = before.z - this.pred.z;
@@ -184,22 +230,26 @@ export class CarGame {
     this.prev.z -= dz;
     this.prev.heading -= dh;
 
-    if (Math.hypot(dx, dz) > 6) {
-      // teleport (new grid position): do not glide there
+    const jump = Math.hypot(dx, dz);
+    if (!this.placed || jump > 6) {
+      // first state or a new grid position: do not glide there
       this.prev = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
+      this.view = { ...this.prev };
       this.smooth = { x: 0, z: 0, heading: 0 };
+      this.followCamera(1, true);
+      this.placed = true;
+      this.myCar.car.visible = true;
     } else {
       this.smooth.x += dx;
       this.smooth.z += dz;
       this.smooth.heading += dh;
     }
-    this.myCar.tailMat.emissiveIntensity =
-      (this.keys.down && this.pred.v > 0.5) || this.keys.brake ? 3.5 : 0.6;
   }
 
   /** One fixed step: send the input and apply it locally. */
   private tick() {
-    const input: PendingInput = { seq: this.seq++, keys: { ...this.keys } };
+    this.keys = this.controls.read();
+    const input: PendingInput = { seq: this.seq++, keys: this.keys };
     this.net.send({ type: 'input', keys: input.keys, seq: input.seq });
 
     this.pending.push(input);
@@ -207,41 +257,44 @@ export class CarGame {
     if (this.pending.length > 40) this.pending.shift();
 
     this.prev = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
-    if (canDrive(this.phase, this.waiting)) {
-      predictStep(this.pred, input.keys, this.totalLaps);
+    if (this.placed && canDrive(this.phase, this.waiting)) {
+      const speed = Math.abs(this.pred.v);
+      predictStep(this.pred, input.keys, this.track, this.spec);
+      // a sudden loss of speed that the brakes cannot explain is a hit
+      if (speed - Math.abs(this.pred.v) > this.spec.brake * TICK_SEC * 2) sfx.bump();
     }
   }
 
   private applyRemote(c: CarState) {
-    let r = this.remotes.get(c.id);
-    if (!r) {
-      this.spawnRemote(c.id, c.nick, c.colorHue);
-      r = this.remotes.get(c.id)!;
+    const r = this.remotes.get(c.id) ?? this.spawnRemote(c.id, c.nick, c.car, c.color);
+    if (!r.target) {
+      r.model.car.position.set(c.x, 0, c.z);
+      r.model.car.rotation.y = c.heading;
     }
     r.target = { x: c.x, z: c.z, heading: c.heading, v: c.v, steer: c.steer };
+    r.waiting = c.waiting;
     r.lastUpdate = performance.now();
-    if (c.nick !== r.name) {
-      if (r.tag) r.obj.car.remove(r.tag);
-      r.name = c.nick;
-      r.tag = makeLabel(c.nick);
-      r.obj.car.add(r.tag);
-    }
   }
 
-  private spawnRemote(id: string, nick: string, hue: number) {
-    if (this.remotes.has(id)) return;
-    const obj = buildCar(hex(hue));
+  private spawnRemote(id: string, nick: string, carId: CarId, color: number): RemoteCar {
+    const existing = this.remotes.get(id);
+    if (existing) return existing;
+    const model = buildCar(carId, paintOf(color));
     const tag = makeLabel(nick);
-    obj.car.add(tag);
-    this.scene.add(obj.car);
-    this.remotes.set(id, {
-      obj,
-      tag,
-      name: nick,
-      target: { x: 46, z: 0, heading: 0, v: 0, steer: 0 },
-      spin: 0,
-      lastUpdate: performance.now(),
-    });
+    model.car.add(tag);
+    model.car.visible = false;
+    this.scene.add(model.car);
+    const remote: RemoteCar = { model, tag, color, target: null, waiting: false, spin: 0, lastUpdate: 0 };
+    this.remotes.set(id, remote);
+    return remote;
+  }
+
+  private removeRemote(id: string) {
+    const r = this.remotes.get(id);
+    if (!r) return;
+    this.scene.remove(r.model.car);
+    disposeTree(r.model.car);
+    this.remotes.delete(id);
   }
 
   private loop = () => {
@@ -272,331 +325,123 @@ export class CarGame {
         this.smooth.heading,
     };
 
-    this.myCar.car.position.set(this.view.x, 0, this.view.z);
-    this.myCar.car.rotation.y = this.view.heading;
-    this.myCar.shell.rotation.set(this.pred.pitch, 0, this.pred.roll);
-    this.myCar.wheels.forEach((w) => {
+    const mine = this.myCar;
+    mine.car.position.set(this.view.x, 0, this.view.z);
+    mine.car.rotation.y = this.view.heading;
+    mine.shell.rotation.set(this.pred.pitch, 0, this.pred.roll);
+    const spin = (this.pred.v / R) * dt;
+    for (const w of mine.wheels) {
       w.pivot.rotation.y = w.front ? this.pred.steer : 0;
-    });
+      w.spin.rotation.x += spin;
+    }
+    const braking = (this.keys.down && this.pred.v > 0.5) || this.keys.brake;
+    mine.tailMat.emissiveIntensity = braking ? 3.5 : 0.6;
 
+    const dots: MapDot[] = [];
     for (const r of this.remotes.values()) {
-      const c = r.obj.car;
       const t = r.target;
+      // somebody waiting for the next race is not on the road
+      r.model.car.visible = t !== null && !(r.waiting && this.phase !== 'lobby');
+      if (!t) continue;
+      const c = r.model.car;
       const age = Math.min((performance.now() - r.lastUpdate) / 1000, 0.12);
       const ex = t.x + Math.sin(t.heading) * t.v * age;
       const ez = t.z + Math.cos(t.heading) * t.v * age;
-      const k = 1 - Math.exp(-16 * dt);
+      const jump = Math.hypot(ex - c.position.x, ez - c.position.z) > 8;
+      const k = jump ? 1 : 1 - Math.exp(-16 * dt);
       c.position.x += (ex - c.position.x) * k;
       c.position.z += (ez - c.position.z) * k;
-      c.rotation.y +=
-        Math.atan2(Math.sin(t.heading - c.rotation.y), Math.cos(t.heading - c.rotation.y)) * k;
+      c.rotation.y += angleDiff(t.heading, c.rotation.y) * k;
       r.spin += (t.v / R) * dt;
-      r.obj.wheels.forEach((w) => {
+      for (const w of r.model.wheels) {
         w.spin.rotation.x = r.spin;
         w.pivot.rotation.y = w.front ? t.steer : 0;
-      });
+      }
+      if (c.visible) dots.push({ x: c.position.x, z: c.position.z, color: paintOf(r.color), me: false });
     }
-
-    const spin = (this.pred.v / R) * dt;
-    this.myCar.wheels.forEach((w) => {
-      w.spin.rotation.x += spin;
-    });
+    dots.push({ x: this.view.x, z: this.view.z, color: paintOf(this.myColor), me: true });
 
     this.followCamera(dt);
-    this.ground.position.set(Math.round(this.view.x / 4) * 4, 0, Math.round(this.view.z / 4) * 4);
-    this.sun.position.set(this.view.x + 25, 40, this.view.z + 18);
-    this.sun.target.position.set(this.view.x, 0, this.view.z);
-
-    this.speedEl.firstChild!.nodeValue = String(Math.round(Math.abs(this.pred.v) * 3.6));
-    const lapShow = Math.min(this.pred.laps + 1, this.totalLaps);
-    this.lapEl.textContent = this.waiting
-      ? 'Вы в следующем заезде'
-      : this.phase === 'finished'
-        ? this.pred.finishPlace
-          ? `Финиш · ${this.pred.finishPlace} место`
-          : 'Финиш'
-        : `Круг ${lapShow}/${this.totalLaps}` +
-          (this.pred.best ? ` · лучший ${this.pred.best.toFixed(1)} с` : '');
-
+    this.world.follow(this.view.x, this.view.z);
     this.renderer.render(this.scene, this.camera);
-
-    if (!this.fpsChecked) {
-      this.fpsFrames++;
-      this.fpsAcc += dt;
-      if (this.fpsFrames >= 90) {
-        this.fpsChecked = true;
-        const fps = this.fpsFrames / this.fpsAcc;
-        if (fps < 28 && this.renderer.getPixelRatio() > 1) {
-          this.renderer.setPixelRatio(1);
-          this.renderer.shadowMap.enabled = false;
-        }
-      }
-    }
+    this.minimap.draw(dots);
+    this.updateHud(dt);
+    this.updateSound(braking);
+    this.checkFrameRate(dt);
   };
 
-  private updateOverlay(phase: RacePhase, countdown?: number) {
-    if (phase === 'countdown' && countdown !== undefined && countdown > 0) {
-      this.overlay.classList.add('show');
-      this.overlayText.textContent = String(countdown);
-      this.resultsEl.classList.remove('show');
-    } else if (phase === 'countdown' && countdown === 0) {
-      this.overlay.classList.add('show');
-      this.overlayText.textContent = 'СТАРТ!';
-    } else if (phase === 'lobby') {
-      this.overlay.classList.add('show');
-      this.overlayText.textContent = 'Ожидание…';
-      this.resultsEl.classList.remove('show');
-    } else if (phase === 'racing') {
-      this.overlay.classList.remove('show');
-      this.resultsEl.classList.remove('show');
+  private updateHud(dt: number) {
+    setText('speed', String(Math.round(Math.abs(this.pred.v) * 3.6)));
+    setText('hudPlace', this.waiting ? '—' : `${this.place || 1} / ${this.racers}`);
+    setText('hudLap', this.waiting ? '—' : `${Math.min(this.pred.laps + 1, this.totalLaps)} / ${this.totalLaps}`);
+    const racing = this.phase === 'racing' && !this.waiting && !this.pred.finished;
+    setText('hudTime', formatTime(racing ? this.lapTime : 0));
+    setText('hudBest', this.pred.best ? `лучший ${formatTime(this.pred.best)}` : '');
+
+    if (this.phase === 'racing' && performance.now() > this.goUntil) showOverlay('');
+
+    const projection = project(this.track, this.view.x, this.view.z, this.pred.progress);
+    const road = pointAt(this.track, projection.s);
+    const along = Math.sin(this.view.heading) * road.tx + Math.cos(this.view.heading) * road.tz;
+    this.wrongWayFor = racing && along < -0.4 && this.pred.v > 4 ? this.wrongWayFor + dt : 0;
+
+    if (this.phase === 'finished' || this.phase === 'lobby') showBanner('');
+    else if (this.waiting) showBanner('Идёт заезд — вы стартуете в следующем');
+    else if (this.pred.finished) showBanner('Финиш! Ждём остальных');
+    else if (this.wrongWayFor > 0.8) showBanner('Не туда! Развернитесь');
+    else showBanner(graceText(this.graceLeft));
+  }
+
+  private updateSound(braking: boolean) {
+    const speed = Math.abs(this.pred.v);
+    const off = project(this.track, this.pred.x, this.pred.z, this.pred.progress).dist > this.track.halfWidth;
+    const hard = speed > 14 && (braking || Math.abs(this.pred.steer) * speed > 11);
+    updateEngine(
+      speed / this.spec.vmax,
+      this.keys.up && this.phase === 'racing',
+      hard ? 1 : 0,
+      off && speed > 4 ? Math.min(1, speed / 25) : 0,
+    );
+  }
+
+  private checkFrameRate(dt: number) {
+    if (this.fpsChecked) return;
+    this.fpsFrames++;
+    this.fpsAcc += dt;
+    if (this.fpsFrames < 90) return;
+    this.fpsChecked = true;
+    if (this.fpsFrames / this.fpsAcc < 28 && !lowPower) {
+      this.renderer.setPixelRatio(1);
+      this.renderer.shadowMap.enabled = false;
     }
   }
 
-  private showResults(rows: RaceResultRow[]) {
-    this.resultsList.innerHTML = '';
-    rows.forEach((r) => {
-      const d = document.createElement('div');
-      d.className = r.place <= 3 ? `place${r.place}` : '';
-      d.textContent =
-        `${r.place}. ${r.nick} — ${r.finished ? `${r.totalTime.toFixed(1)} с` : 'не финишировал'}` +
-        (r.best ? ` (лучший круг ${r.best.toFixed(1)})` : '');
-      this.resultsList.appendChild(d);
-    });
-    this.resultsEl.classList.add('show');
-    this.overlay.classList.remove('show');
-  }
-
-  private followCamera(dt: number) {
-    const dist = 7.5 + Math.abs(this.pred.v) * 0.03;
+  private followCamera(dt: number, snap = false) {
+    const speed = Math.abs(this.pred.v);
+    const dist = 7.8 + speed * 0.03;
     const target = new THREE.Vector3(
       this.view.x - Math.sin(this.view.heading) * dist,
-      3.0,
+      3.3,
       this.view.z - Math.cos(this.view.heading) * dist,
     );
-    this.camera.position.lerp(target, 1 - Math.exp(-10 * dt));
+    if (snap) this.camera.position.copy(target);
+    else this.camera.position.lerp(target, 1 - Math.exp(-10 * dt));
     this.camera.lookAt(
       this.view.x + Math.sin(this.view.heading) * 4,
-      1.2,
+      1.3,
       this.view.z + Math.cos(this.view.heading) * 4,
     );
-    const fov = 60 + Math.min(Math.abs(this.pred.v) / 55, 1) * 14;
+    // a tall phone screen needs a wider vertical angle to see the turns
+    const base = this.camera.aspect < 1 ? 70 : 60;
+    const fov = base + Math.min(speed / 55, 1) * 12;
     this.camera.fov += (fov - this.camera.fov) * Math.min(1, 3 * dt);
     this.camera.updateProjectionMatrix();
   }
 
-  private updateLeaderboard(cars: CarState[]) {
-    const rows = [...cars].sort((a, b) => {
-      if (a.waiting !== b.waiting) return a.waiting ? 1 : -1;
-      if (a.finished && b.finished) return a.finishPlace - b.finishPlace;
-      if (a.finished) return -1;
-      if (b.finished) return 1;
-      return b.progress - a.progress;
-    });
-    this.playersEl.innerHTML = '';
-    const head = document.createElement('div');
-    head.textContent = `Комната: ${this.roomCode}`;
-    head.style.opacity = '.7';
-    this.playersEl.appendChild(head);
-    rows.forEach((c, i) => {
-      const d = document.createElement('div');
-      const me = c.id === this.myId ? ' (вы)' : '';
-      const status = c.waiting
-        ? 'ждёт заезда'
-        : c.finished
-        ? `финиш #${c.finishPlace}`
-        : `круг ${Math.min(c.laps + 1, this.totalLaps)}/${this.totalLaps}`;
-      d.textContent = `${i + 1}. ${c.nick}${me} — ${status}`;
-      if (c.id === this.myId) d.style.fontWeight = '600';
-      this.playersEl.appendChild(d);
-    });
-  }
-
-  private bindInput() {
-    const map: Record<string, keyof InputState> = {
-      KeyW: 'up',
-      ArrowUp: 'up',
-      KeyS: 'down',
-      ArrowDown: 'down',
-      KeyA: 'left',
-      ArrowLeft: 'left',
-      KeyD: 'right',
-      ArrowRight: 'right',
-      Space: 'brake',
-    };
-    this.onKeyDown = (e: KeyboardEvent) => {
-      if (map[e.code]) {
-        e.preventDefault();
-        this.keys[map[e.code]] = true;
-      }
-    };
-    this.onKeyUp = (e: KeyboardEvent) => {
-      if (map[e.code]) this.keys[map[e.code]] = false;
-    };
-    addEventListener('keydown', this.onKeyDown);
-    addEventListener('keyup', this.onKeyUp);
-  }
-
-  private bindMobile() {
-    const coarse = matchMedia('(pointer: coarse)').matches || innerWidth < 900;
-    if (!coarse) return;
-    this.mobileEl.classList.add('show');
-    const zone = document.getElementById('stickZone')!;
-    const knob = document.getElementById('stickKnob')!;
-    const gas = document.getElementById('btnGas')!;
-    const brake = document.getElementById('btnBrake')!;
-    let stickId: number | null = null;
-    const setStick = (clientX: number, clientY: number) => {
-      const rect = zone.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      let dx = clientX - cx;
-      let dy = clientY - cy;
-      const max = 40;
-      const len = Math.hypot(dx, dy) || 1;
-      if (len > max) {
-        dx = (dx / len) * max;
-        dy = (dy / len) * max;
-      }
-      knob.style.transform = `translate(${dx}px, ${dy}px)`;
-      const nx = dx / max;
-      this.keys.left = nx < -0.25;
-      this.keys.right = nx > 0.25;
-    };
-    const resetStick = () => {
-      knob.style.transform = '';
-      this.keys.left = false;
-      this.keys.right = false;
-      stickId = null;
-    };
-    const onZoneStart = (e: TouchEvent) => {
-      e.preventDefault();
-      const t = e.changedTouches[0];
-      stickId = t.identifier;
-      setStick(t.clientX, t.clientY);
-    };
-    const onMove = (e: TouchEvent) => {
-      for (const t of Array.from(e.changedTouches)) {
-        if (t.identifier === stickId) {
-          e.preventDefault();
-          setStick(t.clientX, t.clientY);
-        }
-      }
-    };
-    const onEnd = (e: TouchEvent) => {
-      for (const t of Array.from(e.changedTouches)) {
-        if (t.identifier === stickId) resetStick();
-      }
-    };
-    zone.addEventListener('touchstart', onZoneStart, { passive: false });
-    window.addEventListener('touchmove', onMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
-    window.addEventListener('touchcancel', onEnd);
-    const hold = (el: HTMLElement, key: 'up' | 'brake') => {
-      const down = (e: Event) => {
-        e.preventDefault();
-        if (key === 'up') {
-          this.keys.up = true;
-          el.classList.add('on');
-        } else {
-          this.keys.brake = true;
-          this.keys.down = true;
-          el.classList.add('on');
-        }
-      };
-      const up = () => {
-        if (key === 'up') this.keys.up = false;
-        else {
-          this.keys.brake = false;
-          this.keys.down = false;
-        }
-        el.classList.remove('on');
-      };
-      el.addEventListener('touchstart', down, { passive: false });
-      el.addEventListener('touchend', up);
-      el.addEventListener('touchcancel', up);
-      el.addEventListener('mousedown', down);
-      el.addEventListener('mouseup', up);
-      el.addEventListener('mouseleave', up);
-    };
-    hold(gas, 'up');
-    hold(brake, 'brake');
-    this.unsubTouch = () => {
-      zone.removeEventListener('touchstart', onZoneStart);
-      window.removeEventListener('touchmove', onMove);
-      window.removeEventListener('touchend', onEnd);
-      window.removeEventListener('touchcancel', onEnd);
-    };
-  }
-
-  private onKeyDown = (_e: KeyboardEvent) => {};
-  private onKeyUp = (_e: KeyboardEvent) => {};
   private onResize = () => {
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(innerWidth, innerHeight);
   };
-
-  private setupLights() {
-    this.scene.add(new THREE.HemisphereLight(0xbfdcff, 0x3a5a30, 0.45));
-    this.sun = new THREE.DirectionalLight(0xfff1d6, 1.1);
-    this.sun.castShadow = !this.lowPower;
-    const map = this.lowPower ? 512 : 2048;
-    this.sun.shadow.mapSize.set(map, map);
-    Object.assign(this.sun.shadow.camera, { left: -25, right: 25, top: 25, bottom: -25, near: 1, far: 120 });
-    this.sun.shadow.bias = -0.0004;
-    this.scene.add(this.sun, this.sun.target);
-  }
-
-  private setupWorld(): THREE.Mesh {
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(1000, 1000),
-      new THREE.MeshStandardMaterial({ color: 0x3f7a35, roughness: 1, envMapIntensity: 0.3 }),
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
-    const flat = (geo: THREE.BufferGeometry, color: number, y: number) => {
-      const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.9 }));
-      m.rotation.x = -Math.PI / 2;
-      m.position.y = y;
-      m.receiveShadow = true;
-      this.scene.add(m);
-    };
-    flat(new THREE.RingGeometry(38, 54, 128), 0x2b2c30, 0.03);
-    flat(new THREE.RingGeometry(38.2, 38.5, 128), 0xe8e8e8, 0.05);
-    flat(new THREE.RingGeometry(53.5, 53.8, 128), 0xe8e8e8, 0.05);
-    const N = this.lowPower ? 48 : 120;
-    const trunks = new THREE.InstancedMesh(
-      new THREE.CylinderGeometry(0.25, 0.35, 2, 6),
-      new THREE.MeshStandardMaterial({ color: 0x5b3a22 }),
-      N,
-    );
-    const crowns = new THREE.InstancedMesh(
-      new THREE.ConeGeometry(1.8, 5, 7),
-      new THREE.MeshStandardMaterial({ color: 0x2d5a28, roughness: 0.9 }),
-      N,
-    );
-    const d = new THREE.Object3D();
-    for (let i = 0; i < N; i++) {
-      let x: number, z: number, r: number;
-      do {
-        x = (Math.random() - 0.5) * 480;
-        z = (Math.random() - 0.5) * 480;
-        r = Math.hypot(x, z);
-      } while (r > 34 && r < 60);
-      const s = 0.8 + Math.random() * 0.9;
-      d.position.set(x, s, z);
-      d.scale.setScalar(s);
-      d.updateMatrix();
-      trunks.setMatrixAt(i, d.matrix);
-      d.position.set(x, 2 * s + 2.5 * s, z);
-      d.updateMatrix();
-      crowns.setMatrixAt(i, d.matrix);
-    }
-    trunks.castShadow = crowns.castShadow = !this.lowPower;
-    this.scene.add(trunks, crowns);
-    return ground;
-  }
 }
 
 /** Shortest signed difference between two angles. */
@@ -604,66 +449,12 @@ function angleDiff(a: number, b: number) {
   return Math.atan2(Math.sin(a - b), Math.cos(a - b));
 }
 
-function hex(h: number) {
-  return new THREE.Color().setHSL(h, 0.75, 0.42).getHex();
+function paintOf(index: number) {
+  return (CAR_COLORS[index] ?? CAR_COLORS[0]).hex;
 }
 
-function buildCar(color: number) {
-  const car = new THREE.Group();
-  const shell = new THREE.Group();
-  car.add(shell);
-  const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.55, roughness: 0.28 });
-  const glass = new THREE.MeshStandardMaterial({ color: 0x0d1822, metalness: 0.9, roughness: 0.08 });
-  const black = new THREE.MeshStandardMaterial({ color: 0x0b0b0d, roughness: 0.8 });
-  const headMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff4d6, emissiveIntensity: 1.6 });
-  const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff1010, emissiveIntensity: 0.6 });
-  function extrude(points: number[][], width: number, bevel: number, mat: THREE.Material) {
-    const s = new THREE.Shape(points.map((p) => new THREE.Vector2(p[0], p[1])));
-    const g = new THREE.ExtrudeGeometry(s, { depth: width, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 4 });
-    g.translate(0, 0, -width / 2);
-    g.rotateY(-Math.PI / 2);
-    const m = new THREE.Mesh(g, mat);
-    shell.add(m);
-    return m;
-  }
-  extrude([[-2.1, 0.4], [2.1, 0.4], [2.15, 0.7], [2.0, 0.95], [0.9, 1.0], [-1.5, 1.0], [-2.1, 0.95], [-2.15, 0.7]], 1.6, 0.12, paint);
-  extrude([[0.95, 1.0], [0.35, 1.5], [-0.85, 1.5], [-1.55, 1.0]], 1.3, 0.06, glass);
-  const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    shell.add(m);
-    return m;
-  };
-  add(new THREE.BoxGeometry(1.46, 0.07, 1.3), paint, 0, 1.57, -0.25);
-  add(new THREE.BoxGeometry(1.75, 0.12, 4.3), black, 0, 0.34, 0);
-  add(new THREE.BoxGeometry(1.0, 0.14, 0.06), black, 0, 0.6, 2.2);
-  [-1, 1].forEach((s) => {
-    add(new THREE.BoxGeometry(0.42, 0.14, 0.08), headMat, s * 0.62, 0.8, 2.2);
-    add(new THREE.BoxGeometry(0.5, 0.14, 0.08), tailMat, s * 0.6, 0.82, -2.24);
-    add(new THREE.BoxGeometry(0.12, 0.1, 0.2), paint, s * 0.88, 1.12, 0.7);
-  });
-  const wheels: { pivot: THREE.Group; spin: THREE.Group; front: boolean }[] = [];
-  const tireGeo = new THREE.CylinderGeometry(R, R, 0.3, 32).rotateZ(Math.PI / 2);
-  const rimGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.32, 24).rotateZ(Math.PI / 2);
-  const archGeo = new THREE.CylinderGeometry(0.47, 0.47, 0.34, 24).rotateZ(Math.PI / 2);
-  const tireMat = new THREE.MeshStandardMaterial({ color: 0x151517, roughness: 0.95 });
-  const rimMat = new THREE.MeshStandardMaterial({ color: 0xc4c8ce, metalness: 0.9, roughness: 0.25 });
-  [[-1, 1.4, true], [1, 1.4, true], [-1, -1.4, false], [1, -1.4, false]].forEach(([sx, z, front]) => {
-    const arch = new THREE.Mesh(archGeo, black);
-    arch.position.set((sx as number) * 0.9, R, z as number);
-    shell.add(arch);
-    const pivot = new THREE.Group();
-    pivot.position.set((sx as number) * 1.0, R, z as number);
-    const spin = new THREE.Group();
-    pivot.add(spin);
-    spin.add(new THREE.Mesh(tireGeo, tireMat), new THREE.Mesh(rimGeo, rimMat));
-    car.add(pivot);
-    wheels.push({ pivot, spin, front: front as boolean });
-  });
-  car.traverse((o) => {
-    if ((o as THREE.Mesh).isMesh) o.castShadow = true;
-  });
-  return { car, shell, wheels, tailMat };
+export function lapsText(n: number) {
+  return `${n} ${n === 1 ? 'круг' : n < 5 ? 'круга' : 'кругов'}`;
 }
 
 function makeLabel(text: string) {
@@ -671,16 +462,18 @@ function makeLabel(text: string) {
   c.width = 256;
   c.height = 64;
   const g = c.getContext('2d')!;
-  g.font = '600 30px system-ui, sans-serif';
+  g.font = '700 30px Rubik, system-ui, sans-serif';
   g.textAlign = 'center';
   g.lineWidth = 6;
   g.strokeStyle = 'rgba(0,0,0,.6)';
   g.strokeText(text, 128, 44);
   g.fillStyle = '#fff';
   g.fillText(text, 128, 44);
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, fog: false }));
+  const texture = new THREE.CanvasTexture(c);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, fog: false }));
   s.scale.set(4, 1, 1);
-  s.position.y = 2.6;
+  s.position.y = 3;
   s.renderOrder = 5;
   return s;
 }

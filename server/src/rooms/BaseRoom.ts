@@ -5,12 +5,15 @@ import {
   TICK_MS,
 } from '../../../shared/src/messages.js';
 import type { InputQueue } from './InputQueue.js';
+import type { CarId } from '../../../shared/src/games/car/cars.js';
+import type { TrackId } from '../../../shared/src/games/car/tracks.js';
 
 export interface PlayerSocket {
   id: string;
   ws: WebSocket;
   nick: string;
-  colorHue: number;
+  car: CarId;
+  color: number;
   room: BaseRoom | null;
   inputs: InputQueue;
 }
@@ -31,6 +34,7 @@ export abstract class BaseRoom {
   players = new Map<string, PlayerSocket>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   tickCount = 0;
+  abstract readonly map: TrackId;
   /** true: created by quick play, so strangers may be matched into it */
   isPublic = false;
 
@@ -68,7 +72,7 @@ export abstract class BaseRoom {
     p.room = this;
     this.onPlayerJoin(p);
     this.broadcast(
-      { type: 'player_joined', player: { id: p.id, nick: p.nick, colorHue: p.colorHue } },
+      { type: 'player_joined', player: { id: p.id, nick: p.nick, car: p.car, color: p.color } },
       p.id,
     );
     if (this.players.size === 1) this.start();

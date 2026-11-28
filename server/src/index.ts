@@ -89,13 +89,13 @@ if (isProd) {
   });
 } else {
   app.get('/', async () => ({
-    message: 'Arcade Hub server (dev). Client runs on Vite :5173',
+    message: 'Turbo Poyga server (dev). Client runs on Vite :5173',
   }));
 }
 
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' });
-  console.log(`Arcade Hub listening on :${PORT}`);
+  console.log(`Turbo Poyga listening on :${PORT}`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

@@ -4,6 +4,8 @@
  */
 import { TICK_MS, type CarState, type InputState, type RacePhase } from '../../messages.js';
 import { stepCar, type CarBody } from './physics.js';
+import type { CarSpec } from './cars.js';
+import type { Track } from './tracks.js';
 
 export const TICK_SEC = TICK_MS / 1000;
 
@@ -24,8 +26,9 @@ export function canDrive(phase: RacePhase, waiting: boolean): boolean {
 export function reconcile(
   body: CarBody,
   server: CarState,
+  track: Track,
+  spec: CarSpec,
   phase: RacePhase,
-  totalLaps: number,
   ack: number,
   pending: PendingInput[],
 ): PendingInput[] {
@@ -35,7 +38,6 @@ export function reconcile(
   body.v = server.v;
   body.steer = server.steer;
   body.progress = server.progress;
-  body.lastAng = Math.atan2(server.z, server.x);
   body.laps = server.laps;
   body.best = server.best;
   body.finished = server.finished;
@@ -44,16 +46,16 @@ export function reconcile(
   const rest = pending.filter((p) => p.seq > ack);
   if (!canDrive(phase, server.waiting)) return rest;
 
-  for (const p of rest) predictStep(body, p.keys, totalLaps);
+  for (const p of rest) predictStep(body, p.keys, track, spec);
   // Lap times are measured by the server only
   body.best = server.best;
   return rest;
 }
 
 /** One client-side tick, same length as a server tick. */
-export function predictStep(body: CarBody, keys: InputState, totalLaps: number): void {
-  stepCar(body, keys, TICK_SEC);
-  if (!body.finished && body.laps >= totalLaps) {
+export function predictStep(body: CarBody, keys: InputState, track: Track, spec: CarSpec): void {
+  stepCar(body, keys, TICK_SEC, track, spec);
+  if (!body.finished && body.laps >= track.laps) {
     body.finished = true;
     body.v *= 0.5;
   }

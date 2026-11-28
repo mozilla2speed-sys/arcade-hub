@@ -22,6 +22,7 @@ export function connect(handlers: NetHandlers): Promise<NetClient> {
     const url = `${proto}//${location.host}/ws`;
     const ws = new WebSocket(url);
     let closedByUs = false;
+    let opened = false;
 
     const client: NetClient = {
       send(msg) {
@@ -42,6 +43,7 @@ export function connect(handlers: NetHandlers): Promise<NetClient> {
 
     ws.onopen = () => {
       clearTimeout(timer);
+      opened = true;
       resolve(client);
     };
     ws.onerror = () => {
@@ -59,7 +61,8 @@ export function connect(handlers: NetHandlers): Promise<NetClient> {
       handlers.onMessage(msg);
     };
     ws.onclose = () => {
-      if (!closedByUs) handlers.onClose();
+      // a connection that never opened is reported by the rejected promise instead
+      if (opened && !closedByUs) handlers.onClose();
     };
   });
 }

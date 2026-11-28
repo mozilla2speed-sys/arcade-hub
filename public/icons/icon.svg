@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#0c1220"/>
-  <circle cx="256" cy="256" r="150" fill="#c1121f"/>
-  <path d="M256 140c-30 40-70 90-70 140 0 40 30 70 70 70s70-30 70-70c0-50-40-100-70-140z" fill="#fff" opacity=".9"/>
-  <rect x="220" y="300" width="72" height="18" rx="6" fill="#0c1220"/>
+  <rect width="512" height="512" rx="96" fill="#0d2547"/>
+  <g transform="translate(256 256) scale(1.0) translate(-256 -256)">
+  <rect x="96" y="104" width="40" height="40" fill="#ffffff"/><rect x="96" y="144" width="40" height="40" fill="#111111"/><rect x="136" y="104" width="40" height="40" fill="#111111"/><rect x="136" y="144" width="40" height="40" fill="#ffffff"/><rect x="176" y="104" width="40" height="40" fill="#ffffff"/><rect x="176" y="144" width="40" height="40" fill="#111111"/><rect x="216" y="104" width="40" height="40" fill="#111111"/><rect x="216" y="144" width="40" height="40" fill="#ffffff"/><rect x="256" y="104" width="40" height="40" fill="#ffffff"/><rect x="256" y="144" width="40" height="40" fill="#111111"/><rect x="296" y="104" width="40" height="40" fill="#111111"/><rect x="296" y="144" width="40" height="40" fill="#ffffff"/><rect x="336" y="104" width="40" height="40" fill="#ffffff"/><rect x="336" y="144" width="40" height="40" fill="#111111"/><rect x="376" y="104" width="40" height="40" fill="#111111"/><rect x="376" y="144" width="40" height="40" fill="#ffffff"/>
+  <g fill="#101015"><rect x="108" y="334" width="62" height="74" rx="18"/><rect x="342" y="334" width="62" height="74" rx="18"/></g>
+  <path d="M104 370V300l52-22 34-74h132l34 74 52 22v70z" fill="#e0262f" stroke="#e0262f" stroke-width="16" stroke-linejoin="round"/>
+  <path d="M182 272l24-52h100l24 52z" fill="#8fd8ff"/>
+  <g fill="#ffc928"><rect x="124" y="316" width="66" height="24" rx="8"/><rect x="322" y="316" width="66" height="24" rx="8"/></g>
+  <rect x="220" y="334" width="72" height="26" rx="5" fill="#ffffff"/>
+  </g>
 </svg>

@@ -1,5 +1,5 @@
-/* Arcade Hub service worker — cache shell for faster launch */
-const CACHE = 'arcade-hub-v1';
+/* Turbo Poyga service worker — cache shell for faster launch */
+const CACHE = 'turbo-poyga-v1';
 const PRECACHE = [
   '/',
   '/manifest.webmanifest',

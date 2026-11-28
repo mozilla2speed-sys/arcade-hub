@@ -12,6 +12,8 @@ import { CarRoom } from '../games/car/CarRoom.js';
 import { BaseRoom, type PlayerSocket, safeSend } from './BaseRoom.js';
 import { parseClientMessage } from './protocol.js';
 import { InputQueue } from './InputQueue.js';
+import { DEFAULT_CAR } from '../../../shared/src/games/car/cars.js';
+import { DEFAULT_TRACK, type TrackId } from '../../../shared/src/games/car/tracks.js';
 
 export type { PlayerSocket };
 export { BaseRoom, safeSend };
@@ -26,7 +28,8 @@ export class RoomManager {
       id,
       ws,
       nick: 'Гонщик',
-      colorHue: Math.random(),
+      car: DEFAULT_CAR,
+      color: 0,
       room: null,
       inputs: new InputQueue(),
     };
@@ -62,7 +65,9 @@ export class RoomManager {
 
     const nick = (msg.nick || 'Гонщик').trim().slice(0, MAX_NICK_LEN) || 'Гонщик';
     p.nick = nick;
-    p.colorHue = Math.random();
+    p.car = msg.car ?? DEFAULT_CAR;
+    p.color = msg.color ?? 0;
+    const map = msg.map ?? DEFAULT_TRACK;
 
     const game: GameId = msg.game === 'hole' ? 'hole' : 'car';
 
@@ -70,7 +75,8 @@ export class RoomManager {
 
     if (msg.quick) {
       for (const r of this.rooms.values()) {
-        if (r.isPublic && r.game === game && r.players.size < MAX_PLAYERS_PER_ROOM) {
+        const fits = r.isPublic && r.game === game && r.map === map;
+        if (fits && r.players.size < MAX_PLAYERS_PER_ROOM) {
           room = r;
           break;
         }
@@ -78,7 +84,7 @@ export class RoomManager {
       if (!room) {
         let code = generateCode();
         while (this.rooms.has(code)) code = generateCode();
-        room = this.createRoom(code, game);
+        room = this.createRoom(code, game, map);
         room.isPublic = true;
       }
     } else {
@@ -87,7 +93,7 @@ export class RoomManager {
         'garage';
       room = this.rooms.get(code);
       if (!room) {
-        room = this.createRoom(code, game);
+        room = this.createRoom(code, game, map);
       } else if (room.game !== game) {
         safeSend(p.ws, { type: 'error', message: 'В этой комнате другая игра' });
         return;
@@ -103,7 +109,8 @@ export class RoomManager {
     const players: PlayerInfo[] = [...room.players.values()].map((pl) => ({
       id: pl.id,
       nick: pl.nick,
-      colorHue: pl.colorHue,
+      car: pl.car,
+      color: pl.color,
     }));
 
     safeSend(p.ws, {
@@ -111,12 +118,14 @@ export class RoomManager {
       playerId: p.id,
       roomCode: room.code,
       game: room.game,
+      map: room.map,
       players,
     });
   }
 
-  private createRoom(code: string, game: GameId): BaseRoom {
-    const room: BaseRoom = game === 'car' ? new CarRoom(code) : new CarRoom(code);
+  private createRoom(code: string, game: GameId, map: TrackId): BaseRoom {
+    // only the racing game exists so far
+    const room: BaseRoom = new CarRoom(code, map);
     this.rooms.set(code, room);
     return room;
   }

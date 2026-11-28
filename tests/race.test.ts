@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeRoom } from './helpers.js';
-import { FINISH_GRACE_SEC, MAX_RACE_SEC, TOTAL_LAPS } from '../shared/src/messages.js';
+import { FINISH_GRACE_SEC, MAX_RACE_SEC } from '../shared/src/messages.js';
+import { getTrack, pointAt } from '../shared/src/games/car/tracks.js';
+import type { CarBody } from '../shared/src/games/car/physics.js';
+
+/** Move a car to `metres` past the start line. */
+function place(body: CarBody, metres: number) {
+  const p = pointAt(getTrack('ring'), metres);
+  Object.assign(body, { x: p.x, z: p.z, progress: metres, heading: Math.atan2(p.tx, p.tz) });
+}
 
 test('others get the full grace period even after a long race', (t) => {
   const r = makeRoom(t);
@@ -13,9 +21,9 @@ test('others get the full grace period even after a long race', (t) => {
   for (let i = 0; i < 90 * 20; i++) r.tick(); // well past the old 40 s cut-off
   assert.equal(r.state(leader).phase, 'racing');
 
-  r.body(mid).progress = 10;
-  r.body(slow).progress = 2;
-  r.body(leader).laps = TOTAL_LAPS;
+  place(r.body(mid), 20);
+  place(r.body(slow), 8);
+  r.body(leader).laps = getTrack('ring').laps;
   r.tick();
 
   for (let i = 0; i < (FINISH_GRACE_SEC - 1) * 20; i++) r.tick();

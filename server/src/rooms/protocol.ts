@@ -1,4 +1,6 @@
 import type { ClientMessage, InputState } from '../../../shared/src/messages.js';
+import { CAR_COLORS, isCarId } from '../../../shared/src/games/car/cars.js';
+import { isTrackId } from '../../../shared/src/games/car/tracks.js';
 
 /** Largest accepted WebSocket frame. A real `join` is well under 200 bytes. */
 export const MAX_MESSAGE_BYTES = 1024;
@@ -18,12 +20,15 @@ export function parseClientMessage(raw: string): ClientMessage | null {
 
   switch (data.type) {
     case 'join': {
-      const { nick, code, quick, game } = data;
+      const { nick, code, quick, game, map, car, color } = data;
       if (nick !== undefined && typeof nick !== 'string') return null;
       if (code !== undefined && typeof code !== 'string') return null;
       if (quick !== undefined && typeof quick !== 'boolean') return null;
       if (game !== 'car' && game !== 'hole') return null;
-      return { type: 'join', nick: nick ?? '', code, quick, game };
+      if (map !== undefined && !isTrackId(map)) return null;
+      if (car !== undefined && !isCarId(car)) return null;
+      if (color !== undefined && !isColorIndex(color)) return null;
+      return { type: 'join', nick: nick ?? '', code, quick, game, map, car, color };
     }
     case 'input': {
       const { keys, seq } = data;
@@ -42,6 +47,10 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     default:
       return null;
   }
+}
+
+function isColorIndex(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < CAR_COLORS.length;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

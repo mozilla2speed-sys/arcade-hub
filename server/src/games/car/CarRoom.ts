@@ -4,7 +4,6 @@ import {
   type RacePhase,
   type RaceResultRow,
   type InputState,
-  TOTAL_LAPS,
   FINISH_GRACE_SEC,
   MAX_RACE_SEC,
 } from '../../../../shared/src/messages.js';
@@ -15,6 +14,13 @@ import {
   resolveCollision,
   placeOnGrid,
 } from '../../../../shared/src/games/car/physics.js';
+import { getCar } from '../../../../shared/src/games/car/cars.js';
+import {
+  DEFAULT_TRACK,
+  getTrack,
+  type Track,
+  type TrackId,
+} from '../../../../shared/src/games/car/tracks.js';
 import { canDrive } from '../../../../shared/src/games/car/prediction.js';
 import { BaseRoom, type PlayerSocket, safeSend } from '../../rooms/BaseRoom.js';
 
@@ -43,15 +49,19 @@ export class CarRoom extends BaseRoom {
   private dnf = new Set<string>();
   private results: RaceResultRow[] = [];
   private lobbyStableMs = 0;
+  readonly map: TrackId;
+  private readonly track: Track;
 
-  constructor(code: string) {
+  constructor(code: string, map: TrackId = DEFAULT_TRACK) {
     super(code, 'car');
+    this.map = map;
+    this.track = getTrack(map);
   }
 
   onPlayerJoin(p: PlayerSocket): void {
     const body = createCar();
     const idx = this.cars.size;
-    placeOnGrid(body, idx);
+    placeOnGrid(body, this.track, idx);
     const waiting = this.phase === 'racing' || this.phase === 'finished';
     this.cars.set(p.id, { socket: p, body, waiting });
 
@@ -68,7 +78,7 @@ export class CarRoom extends BaseRoom {
     let i = 0;
     for (const cp of this.cars.values()) {
       cp.waiting = false;
-      placeOnGrid(cp.body, i++);
+      placeOnGrid(cp.body, this.track, i++);
     }
   }
 
@@ -115,7 +125,8 @@ export class CarRoom extends BaseRoom {
 
     for (const cp of list) {
       // stepCar ignores the keys of a finished car and lets it coast
-      stepCar(cp.body, inputs.get(cp.socket.id)!, dt, now);
+      const spec = getCar(cp.socket.car);
+      stepCar(cp.body, inputs.get(cp.socket.id)!, dt, this.track, spec, now);
     }
 
     for (let i = 0; i < list.length; i++) {
@@ -127,7 +138,7 @@ export class CarRoom extends BaseRoom {
 
     // Cars that crossed the line on the same tick: the one further ahead wins
     const arrived = list
-      .filter((cp) => !cp.body.finished && cp.body.laps >= TOTAL_LAPS)
+      .filter((cp) => !cp.body.finished && cp.body.laps >= this.track.laps)
       .sort(byProgress);
     for (const cp of arrived) {
       this.finishCar(cp, now);
@@ -177,7 +188,6 @@ export class CarRoom extends BaseRoom {
       cp.body.raceStart = now;
       cp.body.lapStart = now;
       cp.body.laps = 0;
-      cp.body.progress = cp.body.lastAng;
       cp.body.finished = false;
       cp.body.finishPlace = 0;
       cp.body.best = 0;
@@ -228,7 +238,12 @@ export class CarRoom extends BaseRoom {
         progress: +b.progress.toFixed(2),
         laps: b.laps,
         best: +b.best.toFixed(1),
-        colorHue: cp.socket.colorHue,
+        lapTime:
+          this.phase === 'racing' && !cp.waiting && !b.finished
+            ? +((Date.now() - b.lapStart) / 1000).toFixed(1)
+            : 0,
+        car: cp.socket.car,
+        color: cp.socket.color,
         nick: cp.socket.nick,
         finished: b.finished,
         finishPlace: b.finishPlace,
@@ -240,7 +255,15 @@ export class CarRoom extends BaseRoom {
       tick: this.tickCount,
       phase: this.phase,
       countdown: this.phase === 'countdown' ? this.countdown : undefined,
-      totalLaps: TOTAL_LAPS,
+      totalLaps: this.track.laps,
+      graceLeft:
+        this.phase === 'racing' && this.firstFinishAt !== null
+          ? Math.max(0, Math.ceil(FINISH_GRACE_SEC - (this.phaseTimer - this.firstFinishAt)))
+          : undefined,
+      nextRaceIn:
+        this.phase === 'finished'
+          ? Math.max(0, Math.ceil(RESULT_SHOW_MS / 1000 - this.phaseTimer))
+          : undefined,
       cars,
       ack: p.inputs.ack,
     };

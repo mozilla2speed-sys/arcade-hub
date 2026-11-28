@@ -74,13 +74,7 @@ export class RoomManager {
     let room: BaseRoom | undefined;
 
     if (msg.quick) {
-      for (const r of this.rooms.values()) {
-        const fits = r.isPublic && r.game === game && r.map === map;
-        if (fits && r.players.size < MAX_PLAYERS_PER_ROOM) {
-          room = r;
-          break;
-        }
-      }
+      room = this.findQuickRoom(game, map);
       if (!room) {
         let code = generateCode();
         while (this.rooms.has(code)) code = generateCode();
@@ -121,6 +115,26 @@ export class RoomManager {
       map: room.map,
       players,
     });
+  }
+
+  /**
+   * The open room a quick player should join, on any track: racing against somebody
+   * matters more than the choice of track. Among several rooms, one that starts soon
+   * wins over the chosen track, and the chosen track wins over a fuller room.
+   */
+  private findQuickRoom(game: GameId, map: TrackId): BaseRoom | undefined {
+    let best: BaseRoom | undefined;
+    let bestScore = -1;
+    for (const r of this.rooms.values()) {
+      if (!r.isPublic || r.game !== game || r.players.size >= MAX_PLAYERS_PER_ROOM) continue;
+      // each criterion outweighs all those after it: a room holds fewer than 100 players
+      const score = (r.startsSoon ? 200 : 0) + (r.map === map ? 100 : 0) + r.players.size;
+      if (score > bestScore) {
+        best = r;
+        bestScore = score;
+      }
+    }
+    return best;
   }
 
   private createRoom(code: string, game: GameId, map: TrackId): BaseRoom {

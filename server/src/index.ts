@@ -3,14 +3,19 @@ import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { RoomManager } from './rooms/RoomManager.js';
+import { RoomManager, safeSend } from './rooms/RoomManager.js';
 import { MAX_MESSAGE_BYTES } from './rooms/protocol.js';
 import { RateLimiter } from './rooms/RateLimiter.js';
+import { ConnectionLimit, clientKey, maxPerIp } from './rooms/ConnectionLimit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 const HEARTBEAT_MS = 30_000;
+// Render sets this variable on every service
+const onRender = process.env.RENDER === 'true';
+const connections = new ConnectionLimit(maxPerIp(process.env.MAX_CONNECTIONS_PER_IP));
+let warnedUnknownClient = false;
 
 const app = Fastify({ logger: true });
 const rooms = new RoomManager();
@@ -42,6 +47,24 @@ app.get('/api/stats', async () => rooms.getStats());
 // WebSocket endpoint
 app.register(async function (fastify) {
   fastify.get('/ws', { websocket: true }, (socket, req) => {
+    const key = clientKey(req.headers, req.socket.remoteAddress, onRender);
+    if (key === null && !warnedUnknownClient) {
+      warnedUnknownClient = true;
+      app.log.warn('client address unknown: the per-IP connection limit is not applied');
+    }
+    const release = connections.acquire(key);
+    if (!release) {
+      app.log.warn('connection refused: too many from one address');
+      // without a listener a socket error would take down the whole process
+      socket.on('error', () => {});
+      safeSend(socket, {
+        type: 'error',
+        message: 'Слишком много подключений из вашей сети. Закройте лишние вкладки и попробуйте снова.',
+      });
+      socket.close(1013, 'too many connections');
+      return;
+    }
+
     const player = rooms.createPlayer(socket);
     const limiter = new RateLimiter();
     alive.add(socket);
@@ -63,6 +86,7 @@ app.register(async function (fastify) {
     });
 
     socket.on('close', () => {
+      release();
       rooms.disconnect(player);
     });
 

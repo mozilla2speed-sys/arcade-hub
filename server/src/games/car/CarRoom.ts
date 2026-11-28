@@ -57,6 +57,11 @@ export class CarRoom extends BaseRoom {
     this.track = getTrack(map);
   }
 
+  get startsSoon(): boolean {
+    // after the results the next race is only seconds away
+    return this.phase !== 'racing';
+  }
+
   onPlayerJoin(p: PlayerSocket): void {
     const body = createCar();
     const idx = this.cars.size;

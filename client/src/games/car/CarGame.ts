@@ -405,7 +405,8 @@ export class CarGame {
     this.wrongWayFor = racing && along < -0.4 && this.pred.v > 4 ? this.wrongWayFor + dt : 0;
 
     if (this.phase === 'finished' || this.phase === 'lobby') showBanner('');
-    else if (this.waiting) showBanner('Идёт заезд — вы стартуете в следующем');
+    // quick play may have picked another track, so name the one they are on
+    else if (this.waiting) showBanner(`${this.track.name}: идёт заезд — вы стартуете в следующем`);
     else if (this.pred.finished) showBanner('Финиш! Ждём остальных');
     else if (this.wrongWayFor > 0.8) showBanner('Не туда! Развернитесь');
     else showBanner(graceText(this.graceLeft));

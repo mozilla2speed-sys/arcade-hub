@@ -208,6 +208,7 @@ function showFriends(open: boolean) {
   friends.hidden = !open;
   // one big button at a time: a friend who opened a link must not hit quick play by mistake
   quickBtn.hidden = open;
+  byId('quickHint').hidden = open;
   joinBtn.hidden = !open;
   byId('shareMenu').hidden = !open;
   friendsToggle.setAttribute('aria-expanded', String(open));

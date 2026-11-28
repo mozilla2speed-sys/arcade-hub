@@ -50,6 +50,8 @@ export abstract class BaseRoom {
   abstract onPlayerLeave(p: PlayerSocket): void;
   abstract onTick(dt: number): void;
   abstract getStateFor(p: PlayerSocket): ServerMessage | null;
+  /** true: somebody who joins now gets to play shortly, not after a running match */
+  abstract get startsSoon(): boolean;
 
   start() {
     if (this.schedule) return;

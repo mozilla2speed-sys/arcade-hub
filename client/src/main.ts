@@ -353,7 +353,9 @@ function handleMessage(msg: ServerMessage) {
       (msg.map !== wantedMap ? ` · трасса этой комнаты: ${getTrack(msg.map).name}` : '');
     showGameUI(true);
     openActions(false);
-    game = new CarGame(net!, msg.playerId, msg.roomCode, msg.map, msg.players, choice.theme);
+    game = new CarGame(
+      net!, msg.playerId, msg.roomCode, msg.map, msg.players, choice.theme, params.get('debug') === '1',
+    );
     game.start();
   } else if (msg.type === 'error' || msg.type === 'room_full') {
     setStatus(msg.type === 'error' ? msg.message : 'Комната заполнена');

@@ -5,6 +5,7 @@ import {
   TICK_MS,
 } from '../../../shared/src/messages.js';
 import type { InputQueue } from './InputQueue.js';
+import { TickSchedule } from './TickSchedule.js';
 import type { CarId } from '../../../shared/src/games/car/cars.js';
 import type { TrackId } from '../../../shared/src/games/car/tracks.js';
 
@@ -32,7 +33,9 @@ export abstract class BaseRoom {
   readonly code: string;
   readonly game: GameId;
   players = new Map<string, PlayerSocket>();
-  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private schedule: TickSchedule | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private immediate: ReturnType<typeof setImmediate> | null = null;
   tickCount = 0;
   abstract readonly map: TrackId;
   /** true: created by quick play, so strangers may be matched into it */
@@ -49,22 +52,41 @@ export abstract class BaseRoom {
   abstract getStateFor(p: PlayerSocket): ServerMessage | null;
 
   start() {
-    if (this.tickTimer) return;
-    this.tickTimer = setInterval(() => {
+    if (this.schedule) return;
+    this.schedule = new TickSchedule(performance.now(), TICK_MS);
+    this.arm();
+  }
+
+  stop() {
+    if (this.timer) clearTimeout(this.timer);
+    if (this.immediate) clearImmediate(this.immediate);
+    this.timer = this.immediate = this.schedule = null;
+  }
+
+  private arm() {
+    const wait = Math.max(0, this.schedule!.next - performance.now());
+    this.timer = setTimeout(() => {
+      // Timers run before network input. Waiting one step lets inputs that piled
+      // up during a stall arrive before the ticks that need them.
+      this.immediate = setImmediate(() => this.run());
+    }, wait);
+  }
+
+  private run() {
+    if (!this.schedule) return;
+    const count = this.schedule.due(performance.now());
+    for (let i = 0; i < count; i++) {
       this.tickCount++;
       this.onTick(TICK_MS / 1000);
+    }
+    // after catching up only the newest state is worth sending
+    if (count > 0) {
       for (const p of this.players.values()) {
         const msg = this.getStateFor(p);
         if (msg) safeSend(p.ws, msg);
       }
-    }, TICK_MS);
-  }
-
-  stop() {
-    if (this.tickTimer) {
-      clearInterval(this.tickTimer);
-      this.tickTimer = null;
     }
+    this.arm();
   }
 
   add(p: PlayerSocket) {

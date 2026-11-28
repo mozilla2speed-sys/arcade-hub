@@ -52,6 +52,12 @@ function seeded(seed: number) {
   };
 }
 
+const SUN_OFFSET = new THREE.Vector3(25, 45, 18);
+/** size of one shadow-map pixel on the ground: 60 m across 2048 pixels */
+const SHADOW_TEXEL = 60 / 2048;
+const shadowRight = new THREE.Vector3(0, 1, 0).cross(SUN_OFFSET).normalize();
+const shadowUp = SUN_OFFSET.clone().cross(shadowRight).normalize();
+
 export function buildWorld(track: Track, theme: Theme): World {
   const night = theme === 'night';
   const pal = night ? NIGHT : DAY;
@@ -354,8 +360,13 @@ export function buildWorld(track: Track, theme: Theme): World {
     background: new THREE.Color(pal.sky),
     fog: new THREE.Fog(pal.sky, pal.fog[0], pal.fog[1]),
     follow(x, z) {
-      sun.position.set(x + 25, 45, z + 18);
-      sun.target.position.set(x, 0, z);
+      // move the light in whole shadow pixels, otherwise shadow edges shimmer
+      const target = sun.target.position.set(x, 0, z);
+      for (const axis of [shadowRight, shadowUp]) {
+        const along = target.dot(axis);
+        target.addScaledVector(axis, Math.round(along / SHADOW_TEXEL) * SHADOW_TEXEL - along);
+      }
+      sun.position.copy(target).add(SUN_OFFSET);
     },
   };
 }

@@ -13,6 +13,7 @@ import {
   getTrack,
   pointAt,
   project,
+  type Projection,
   type Track,
   type TrackId,
 } from '../../../../shared/src/games/car/tracks.js';
@@ -29,6 +30,8 @@ import { buildCar, type CarModel } from '../../render/carModels.js';
 import { buildWorld, type World } from '../../render/world.js';
 import { bindControls } from './controls.js';
 import { createMinimap, type MapDot } from './minimap.js';
+import { RemoteMotion, ServerClock } from './remoteMotion.js';
+import { createDebugPanel } from './debugPanel.js';
 import { sfx, startEngine, stopEngine, updateEngine } from './sound.js';
 import {
   formatTime,
@@ -53,10 +56,11 @@ interface RemoteCar {
   model: CarModel;
   tag: THREE.Sprite;
   color: number;
-  target: { x: number; z: number; heading: number; v: number; steer: number } | null;
+  motion: RemoteMotion;
   waiting: boolean;
   spin: number;
-  lastUpdate: number;
+  /** already placed on screen, so later positions are blended in */
+  shown: boolean;
 }
 
 export class CarGame {
@@ -103,6 +107,11 @@ export class CarGame {
   private wasFinished = false;
   private wrongWayFor = 0;
 
+  private serverClock = new ServerClock();
+  private debug: ReturnType<typeof createDebugPanel> | null = null;
+  private cameraTarget = new THREE.Vector3();
+  private minimapWait = 0;
+
   private fpsFrames = 0;
   private fpsAcc = 0;
   private fpsChecked = false;
@@ -114,7 +123,9 @@ export class CarGame {
     mapId: TrackId,
     players: PlayerInfo[],
     theme: Theme,
+    debug = false,
   ) {
+    if (debug) this.debug = createDebugPanel((t) => this.net.send({ type: 'ping', t }));
     this.track = getTrack(mapId);
     this.totalLaps = this.track.laps;
     this.world = buildWorld(this.track, theme);
@@ -151,6 +162,7 @@ export class CarGame {
     cancelAnimationFrame(this.raf);
     removeEventListener('resize', this.onResize);
     this.controls.destroy();
+    this.debug?.destroy();
     stopEngine();
     resetHud();
     disposeTree(this.scene);
@@ -162,15 +174,18 @@ export class CarGame {
       if (p.id !== this.myId) this.spawnRemote(p.id, p.nick, p.car, p.color);
     } else if (msg.type === 'player_left') {
       this.removeRemote(msg.playerId);
+    } else if (msg.type === 'pong') {
+      this.debug?.pong(msg.t);
     } else if (msg.type === 'state') {
       const me = msg.cars.find((c) => c.id === this.myId);
       this.updatePhase(msg.phase, msg.countdown);
       this.totalLaps = msg.totalLaps;
       this.graceLeft = msg.graceLeft;
       this.waiting = me?.waiting ?? false;
+      this.serverClock.observe(msg.tick, performance.now());
       for (const c of msg.cars) {
         if (c.id === this.myId) this.applyOwn(c, msg.ack);
-        else this.applyRemote(c);
+        else this.applyRemote(c, msg.tick);
       }
       const order = raceOrder(msg.cars);
       this.racers = Math.max(1, order.filter((c) => !c.waiting).length);
@@ -231,6 +246,7 @@ export class CarGame {
     this.prev.heading -= dh;
 
     const jump = Math.hypot(dx, dz);
+    if (this.placed && this.phase === 'racing') this.debug?.state(jump > 6 ? 0 : jump, this.pending.length);
     if (!this.placed || jump > 6) {
       // first state or a new grid position: do not glide there
       this.prev = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
@@ -265,15 +281,10 @@ export class CarGame {
     }
   }
 
-  private applyRemote(c: CarState) {
+  private applyRemote(c: CarState, tick: number) {
     const r = this.remotes.get(c.id) ?? this.spawnRemote(c.id, c.nick, c.car, c.color);
-    if (!r.target) {
-      r.model.car.position.set(c.x, 0, c.z);
-      r.model.car.rotation.y = c.heading;
-    }
-    r.target = { x: c.x, z: c.z, heading: c.heading, v: c.v, steer: c.steer };
+    r.motion.push(tick, c);
     r.waiting = c.waiting;
-    r.lastUpdate = performance.now();
   }
 
   private spawnRemote(id: string, nick: string, carId: CarId, color: number): RemoteCar {
@@ -284,7 +295,9 @@ export class CarGame {
     model.car.add(tag);
     model.car.visible = false;
     this.scene.add(model.car);
-    const remote: RemoteCar = { model, tag, color, target: null, waiting: false, spin: 0, lastUpdate: 0 };
+    const remote: RemoteCar = {
+      model, tag, color, motion: new RemoteMotion(), waiting: false, spin: 0, shown: false,
+    };
     this.remotes.set(id, remote);
     return remote;
   }
@@ -338,19 +351,19 @@ export class CarGame {
     mine.tailMat.emissiveIntensity = braking ? 3.5 : 0.6;
 
     const dots: MapDot[] = [];
+    const renderTime = this.serverClock.renderTime(performance.now());
     for (const r of this.remotes.values()) {
-      const t = r.target;
       // somebody waiting for the next race is not on the road
-      r.model.car.visible = t !== null && !(r.waiting && this.phase !== 'lobby');
-      if (!t) continue;
+      r.model.car.visible = !r.motion.empty && !(r.waiting && this.phase !== 'lobby');
+      if (r.motion.empty) continue;
       const c = r.model.car;
-      const age = Math.min((performance.now() - r.lastUpdate) / 1000, 0.12);
-      const ex = t.x + Math.sin(t.heading) * t.v * age;
-      const ez = t.z + Math.cos(t.heading) * t.v * age;
-      const jump = Math.hypot(ex - c.position.x, ez - c.position.z) > 8;
-      const k = jump ? 1 : 1 - Math.exp(-16 * dt);
-      c.position.x += (ex - c.position.x) * k;
-      c.position.z += (ez - c.position.z) * k;
+      const t = r.motion.at(renderTime);
+      const jump = !r.shown || Math.hypot(t.x - c.position.x, t.z - c.position.z) > 8;
+      // light blending only hides the small error left after a late state
+      const k = jump ? 1 : 1 - Math.exp(-25 * dt);
+      r.shown = true;
+      c.position.x += (t.x - c.position.x) * k;
+      c.position.z += (t.z - c.position.z) * k;
       c.rotation.y += angleDiff(t.heading, c.rotation.y) * k;
       r.spin += (t.v / R) * dt;
       for (const w of r.model.wheels) {
@@ -364,13 +377,20 @@ export class CarGame {
     this.followCamera(dt);
     this.world.follow(this.view.x, this.view.z);
     this.renderer.render(this.scene, this.camera);
-    this.minimap.draw(dots);
-    this.updateHud(dt);
-    this.updateSound(braking);
+    // the small map does not need every frame
+    this.minimapWait -= dt;
+    if (this.minimapWait <= 0) {
+      this.minimapWait = 1 / 20;
+      this.minimap.draw(dots);
+    }
+    const onRoad = project(this.track, this.view.x, this.view.z, this.pred.progress);
+    this.updateHud(dt, onRoad);
+    this.updateSound(braking, onRoad.dist);
     this.checkFrameRate(dt);
+    this.debug?.frame(elapsed * 1000);
   };
 
-  private updateHud(dt: number) {
+  private updateHud(dt: number, projection: Projection) {
     setText('speed', String(Math.round(Math.abs(this.pred.v) * 3.6)));
     setText('hudPlace', this.waiting ? '—' : `${this.place || 1} / ${this.racers}`);
     setText('hudLap', this.waiting ? '—' : `${Math.min(this.pred.laps + 1, this.totalLaps)} / ${this.totalLaps}`);
@@ -380,7 +400,6 @@ export class CarGame {
 
     if (this.phase === 'racing' && performance.now() > this.goUntil) showOverlay('');
 
-    const projection = project(this.track, this.view.x, this.view.z, this.pred.progress);
     const road = pointAt(this.track, projection.s);
     const along = Math.sin(this.view.heading) * road.tx + Math.cos(this.view.heading) * road.tz;
     this.wrongWayFor = racing && along < -0.4 && this.pred.v > 4 ? this.wrongWayFor + dt : 0;
@@ -392,9 +411,9 @@ export class CarGame {
     else showBanner(graceText(this.graceLeft));
   }
 
-  private updateSound(braking: boolean) {
+  private updateSound(braking: boolean, fromCentre: number) {
     const speed = Math.abs(this.pred.v);
-    const off = project(this.track, this.pred.x, this.pred.z, this.pred.progress).dist > this.track.halfWidth;
+    const off = fromCentre > this.track.halfWidth;
     const hard = speed > 14 && (braking || Math.abs(this.pred.steer) * speed > 11);
     updateEngine(
       speed / this.spec.vmax,
@@ -419,7 +438,7 @@ export class CarGame {
   private followCamera(dt: number, snap = false) {
     const speed = Math.abs(this.pred.v);
     const dist = 7.8 + speed * 0.03;
-    const target = new THREE.Vector3(
+    const target = this.cameraTarget.set(
       this.view.x - Math.sin(this.view.heading) * dist,
       3.3,
       this.view.z - Math.cos(this.view.heading) * dist,

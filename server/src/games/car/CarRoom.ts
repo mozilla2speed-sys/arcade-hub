@@ -3,7 +3,6 @@ import {
   type CarState,
   type RacePhase,
   type RaceResultRow,
-  type InputState,
   FINISH_GRACE_SEC,
   MAX_RACE_SEC,
 } from '../../../../shared/src/messages.js';
@@ -21,7 +20,7 @@ import {
   type Track,
   type TrackId,
 } from '../../../../shared/src/games/car/tracks.js';
-import { canDrive } from '../../../../shared/src/games/car/prediction.js';
+import { TICK_SEC, canDrive } from '../../../../shared/src/games/car/prediction.js';
 import { BaseRoom, type PlayerSocket, safeSend } from '../../rooms/BaseRoom.js';
 
 interface CarPlayer {
@@ -86,9 +85,10 @@ export class CarRoom extends BaseRoom {
     const now = Date.now();
     this.phaseTimer += dt;
 
-    // One input per player per tick in every phase, so none pile up before the start
-    const inputs = new Map<string, InputState>();
-    for (const [id, cp] of this.cars) inputs.set(id, cp.socket.inputs.next());
+    // Cars that cannot move accept their inputs at once, so none pile up before the start
+    for (const cp of this.cars.values()) {
+      if (!canDrive(this.phase, cp.waiting)) cp.socket.inputs.drain();
+    }
 
     if (this.phase === 'lobby') {
       this.lobbyStableMs += dt * 1000;
@@ -126,7 +126,10 @@ export class CarRoom extends BaseRoom {
     for (const cp of list) {
       // stepCar ignores the keys of a finished car and lets it coast
       const spec = getCar(cp.socket.car);
-      stepCar(cp.body, inputs.get(cp.socket.id)!, dt, this.track, spec, now);
+      // usually one step; see InputQueue for late inputs
+      for (const keys of cp.socket.inputs.next()) {
+        stepCar(cp.body, keys, dt, this.track, spec, now);
+      }
     }
 
     for (let i = 0; i < list.length; i++) {
@@ -228,10 +231,16 @@ export class CarRoom extends BaseRoom {
     const cars: CarState[] = [];
     for (const [id, cp] of this.cars) {
       const b = cp.body;
+      // Others must not see a car freeze while it waits for late input: show it
+      // where it is heading. Its owner gets the exact state for prediction.
+      const ahead =
+        id !== p.id && canDrive(this.phase, cp.waiting)
+          ? b.v * TICK_SEC * Math.min(cp.socket.inputs.waitingTicks, 4)
+          : 0;
       cars.push({
         id,
-        x: +b.x.toFixed(2),
-        z: +b.z.toFixed(2),
+        x: +(b.x + Math.sin(b.heading) * ahead).toFixed(2),
+        z: +(b.z + Math.cos(b.heading) * ahead).toFixed(2),
         heading: +b.heading.toFixed(3),
         v: +b.v.toFixed(2),
         steer: +b.steer.toFixed(3),

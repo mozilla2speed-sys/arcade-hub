@@ -38,8 +38,16 @@ export function setText(id: string, text: string) {
   if (node.textContent !== text) node.textContent = text;
 }
 
+let boardShown = '';
+
 export function updateBoard(order: CarState[], myId: string, roomCode: string, totalLaps: number) {
   setText('roomName', `Комната: ${roomCode}`);
+  // states come 20 times a second; rebuild the list only when it would look different
+  const looks = JSON.stringify(
+    order.map((c) => [c.id, c.nick, c.color, c.waiting, c.finished, Math.min(c.laps + 1, totalLaps), totalLaps, myId]),
+  );
+  if (looks === boardShown) return;
+  boardShown = looks;
   byId('boardList').replaceChildren(
     ...order.map((c, i) => {
       const row = el('div', c.id === myId ? 'row me' : 'row');
@@ -108,6 +116,7 @@ export function resetHud() {
   showOverlay('');
   hideResults();
   byId('boardList').replaceChildren();
+  boardShown = '';
   setText('nextRace', '');
   byId('actions').classList.remove('open');
 }

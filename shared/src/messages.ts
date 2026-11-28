@@ -38,6 +38,8 @@ export type ServerMessage =
       countdown?: number;
       totalLaps: number;
       cars: CarState[];
+      /** seq of the receiver's last input applied by the server (-1: none yet) */
+      ack: number;
     }
   | { type: 'pong'; t: number }
   | { type: 'error'; message: string }
@@ -59,6 +61,8 @@ export interface CarState {
   nick: string;
   finished: boolean;
   finishPlace: number; // 0 = still racing
+  /** joined mid-race, will drive in the next one */
+  waiting: boolean;
 }
 
 export interface RaceResultRow {
@@ -67,6 +71,8 @@ export interface RaceResultRow {
   place: number;
   best: number;
   totalTime: number;
+  /** false: did not cross the line before the race was closed */
+  finished: boolean;
 }
 
 export const TICK_RATE = 20; // Hz
@@ -75,3 +81,7 @@ export const MAX_PLAYERS_PER_ROOM = 8;
 export const MAX_NICK_LEN = 14;
 export const MAX_CODE_LEN = 20;
 export const TOTAL_LAPS = 3;
+/** Time the others get after the first car crosses the line */
+export const FINISH_GRACE_SEC = 20;
+/** Hard limit, so a race where nobody finishes still ends */
+export const MAX_RACE_SEC = 300;

@@ -4,15 +4,32 @@ import fastifyStatic from '@fastify/static';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RoomManager } from './rooms/RoomManager.js';
+import { MAX_MESSAGE_BYTES } from './rooms/protocol.js';
+import { RateLimiter } from './rooms/RateLimiter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
+const HEARTBEAT_MS = 30_000;
 
 const app = Fastify({ logger: true });
 const rooms = new RoomManager();
 
-await app.register(websocket);
+await app.register(websocket, { options: { maxPayload: MAX_MESSAGE_BYTES } });
+
+// Drop connections that stopped answering pings (e.g. a phone that lost network)
+const alive = new WeakSet<object>();
+const heartbeat = setInterval(() => {
+  for (const client of app.websocketServer.clients) {
+    if (!alive.has(client)) {
+      client.terminate();
+      continue;
+    }
+    alive.delete(client);
+    client.ping();
+  }
+}, HEARTBEAT_MS);
+app.addHook('onClose', async () => clearInterval(heartbeat));
 
 // Health check for cron-job.org / Render keep-alive
 app.get('/health', async () => {
@@ -26,10 +43,23 @@ app.get('/api/stats', async () => rooms.getStats());
 app.register(async function (fastify) {
   fastify.get('/ws', { websocket: true }, (socket, req) => {
     const player = rooms.createPlayer(socket);
+    const limiter = new RateLimiter();
+    alive.add(socket);
+    socket.on('pong', () => alive.add(socket));
 
     socket.on('message', (raw) => {
-      const data = typeof raw === 'string' ? raw : raw.toString();
-      rooms.handleMessage(player, data);
+      if (socket.readyState !== socket.OPEN) return;
+      if (!limiter.allow()) {
+        socket.close(1008, 'rate limit');
+        return;
+      }
+      // An exception here would otherwise take down the whole process
+      try {
+        rooms.handleMessage(player, raw.toString());
+      } catch (err) {
+        app.log.error(err, 'failed to handle message');
+        socket.close(1011, 'internal error');
+      }
     });
 
     socket.on('close', () => {

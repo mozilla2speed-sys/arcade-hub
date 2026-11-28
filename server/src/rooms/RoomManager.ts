@@ -4,13 +4,14 @@ import {
   type GameId,
   type ClientMessage,
   type PlayerInfo,
-  type InputState,
   MAX_PLAYERS_PER_ROOM,
   MAX_NICK_LEN,
   MAX_CODE_LEN,
 } from '../../../shared/src/messages.js';
 import { CarRoom } from '../games/car/CarRoom.js';
 import { BaseRoom, type PlayerSocket, safeSend } from './BaseRoom.js';
+import { parseClientMessage } from './protocol.js';
+import { InputQueue } from './InputQueue.js';
 
 export type { PlayerSocket };
 export { BaseRoom, safeSend };
@@ -27,19 +28,16 @@ export class RoomManager {
       nick: 'Гонщик',
       colorHue: Math.random(),
       room: null,
-      lastInput: { up: false, down: false, left: false, right: false, brake: false },
-      seq: 0,
+      inputs: new InputQueue(),
     };
     this.players.set(id, p);
     return p;
   }
 
   handleMessage(p: PlayerSocket, raw: string) {
-    let msg: ClientMessage;
-    try {
-      msg = JSON.parse(raw);
-    } catch {
-      safeSend(p.ws, { type: 'error', message: 'bad json' });
+    const msg = parseClientMessage(raw);
+    if (!msg) {
+      safeSend(p.ws, { type: 'error', message: 'bad message' });
       return;
     }
 
@@ -48,10 +46,7 @@ export class RoomManager {
         this.handleJoin(p, msg);
         break;
       case 'input':
-        if (p.room && typeof msg.seq === 'number') {
-          p.lastInput = sanitizeInput(msg.keys);
-          p.seq = msg.seq;
-        }
+        if (p.room) p.inputs.push(msg.seq, msg.keys);
         break;
       case 'ping':
         safeSend(p.ws, { type: 'pong', t: msg.t });
@@ -100,6 +95,7 @@ export class RoomManager {
       }
     }
 
+    p.inputs.reset();
     room.add(p);
 
     const players: PlayerInfo[] = [...room.players.values()].map((pl) => ({
@@ -151,14 +147,4 @@ function generateCode(): string {
   let s = '';
   for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
-}
-
-function sanitizeInput(k: any): InputState {
-  return {
-    up: !!k?.up,
-    down: !!k?.down,
-    left: !!k?.left,
-    right: !!k?.right,
-    brake: !!k?.brake,
-  };
 }

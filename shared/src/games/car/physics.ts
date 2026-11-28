@@ -3,6 +3,8 @@
  * Used by both server (authoritative) and client (prediction / visuals).
  */
 
+import type { InputState } from '../../messages.js';
+
 export const R = 0.38; // wheel radius
 export const WB = 2.8; // wheelbase
 export const VMAX = 55; // m/s ≈ 198 km/h
@@ -25,14 +27,6 @@ export interface CarBody {
   finished: boolean;
   finishPlace: number;
   totalTime: number;
-}
-
-export interface InputState {
-  up: boolean;
-  down: boolean;
-  left: boolean;
-  right: boolean;
-  brake: boolean;
 }
 
 export function createCar(x = TRACK_RADIUS, z = 0): CarBody {

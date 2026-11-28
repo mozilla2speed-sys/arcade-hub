@@ -2,9 +2,9 @@ import type { WebSocket } from 'ws';
 import {
   type GameId,
   type ServerMessage,
-  type InputState,
   TICK_MS,
 } from '../../../shared/src/messages.js';
+import type { InputQueue } from './InputQueue.js';
 
 export interface PlayerSocket {
   id: string;
@@ -12,8 +12,7 @@ export interface PlayerSocket {
   nick: string;
   colorHue: number;
   room: BaseRoom | null;
-  lastInput: InputState;
-  seq: number;
+  inputs: InputQueue;
 }
 
 export function safeSend(ws: WebSocket, msg: ServerMessage) {

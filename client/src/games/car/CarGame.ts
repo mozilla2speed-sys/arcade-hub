@@ -11,9 +11,15 @@ import type {
 import {
   R,
   createCar,
-  stepCar,
   type CarBody,
 } from '../../../../shared/src/games/car/physics.js';
+import {
+  TICK_SEC,
+  canDrive,
+  predictStep,
+  reconcile,
+  type PendingInput,
+} from '../../../../shared/src/games/car/prediction.js';
 
 const SKY = 0xaed4ee;
 
@@ -40,16 +46,22 @@ export class CarGame {
 
   private keys: InputState = { up: false, down: false, left: false, right: false, brake: false };
   private seq = 0;
-  private sendAcc = 0;
+  private tickAcc = 0;
+  private pending: PendingInput[] = [];
+  private waiting = false;
   private playing = true;
   private raf = 0;
   private clock = new THREE.Clock();
 
   private pred: CarBody = createCar();
-  private serverSteer = 0;
+  /** predicted state one tick ago, to interpolate between ticks */
+  private prev = { x: 46, z: 0, heading: 0 };
+  /** visual-only offset that hides server corrections, decays to zero */
+  private smooth = { x: 0, z: 0, heading: 0 };
+  /** what is actually drawn */
+  private view = { x: 46, z: 0, heading: 0 };
   private phase: RacePhase = 'lobby';
   private totalLaps = 3;
-  private lastServerTick = 0;
   private lowPower = false;
 
   private speedEl = document.getElementById('speed')!;
@@ -148,10 +160,10 @@ export class CarGame {
     } else if (msg.type === 'state') {
       this.phase = msg.phase;
       this.totalLaps = msg.totalLaps;
-      this.lastServerTick = msg.tick;
+      this.waiting = msg.cars.find((c) => c.id === this.myId)?.waiting ?? false;
       this.updateOverlay(msg.phase, msg.countdown);
       for (const c of msg.cars) {
-        if (c.id === this.myId) this.reconcile(c);
+        if (c.id === this.myId) this.applyOwn(c, msg.ack);
         else this.applyRemote(c);
       }
       this.updateLeaderboard(msg.cars);
@@ -160,33 +172,44 @@ export class CarGame {
     }
   }
 
-  private reconcile(c: CarState) {
-    const err = Math.hypot(c.x - this.pred.x, c.z - this.pred.z);
-    const headingErr = Math.atan2(
-      Math.sin(c.heading - this.pred.heading),
-      Math.cos(c.heading - this.pred.heading),
-    );
-    if (err > 6 || this.phase === 'lobby' || this.phase === 'countdown') {
-      this.pred.x = c.x;
-      this.pred.z = c.z;
-      this.pred.heading = c.heading;
-      this.pred.v = c.v;
-      this.pred.steer = c.steer;
-    } else if (err > 0.2) {
-      const k = Math.min(0.06 + err * 0.015, 0.14);
-      this.pred.x += (c.x - this.pred.x) * k;
-      this.pred.z += (c.z - this.pred.z) * k;
-      this.pred.heading += headingErr * (k * 0.6);
-      this.pred.v += (c.v - this.pred.v) * 0.06;
+  private applyOwn(c: CarState, ack: number) {
+    const before = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
+    this.pending = reconcile(this.pred, c, this.phase, this.totalLaps, ack, this.pending);
+
+    const dx = before.x - this.pred.x;
+    const dz = before.z - this.pred.z;
+    const dh = angleDiff(before.heading, this.pred.heading);
+    // Move the interpolation start together with the correction
+    this.prev.x -= dx;
+    this.prev.z -= dz;
+    this.prev.heading -= dh;
+
+    if (Math.hypot(dx, dz) > 6) {
+      // teleport (new grid position): do not glide there
+      this.prev = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
+      this.smooth = { x: 0, z: 0, heading: 0 };
+    } else {
+      this.smooth.x += dx;
+      this.smooth.z += dz;
+      this.smooth.heading += dh;
     }
-    this.pred.progress = c.progress;
-    this.pred.laps = c.laps;
-    this.pred.best = c.best;
-    this.pred.finished = c.finished;
-    this.pred.finishPlace = c.finishPlace;
-    this.serverSteer = c.steer;
     this.myCar.tailMat.emissiveIntensity =
       (this.keys.down && this.pred.v > 0.5) || this.keys.brake ? 3.5 : 0.6;
+  }
+
+  /** One fixed step: send the input and apply it locally. */
+  private tick() {
+    const input: PendingInput = { seq: this.seq++, keys: { ...this.keys } };
+    this.net.send({ type: 'input', keys: input.keys, seq: input.seq });
+
+    this.pending.push(input);
+    // two seconds of history is far more than any playable latency
+    if (this.pending.length > 40) this.pending.shift();
+
+    this.prev = { x: this.pred.x, z: this.pred.z, heading: this.pred.heading };
+    if (canDrive(this.phase, this.waiting)) {
+      predictStep(this.pred, input.keys, this.totalLaps);
+    }
   }
 
   private applyRemote(c: CarState) {
@@ -224,24 +247,33 @@ export class CarGame {
   private loop = () => {
     if (!this.playing) return;
     this.raf = requestAnimationFrame(this.loop);
-    const dt = Math.min(this.clock.getDelta(), 0.05) || 0.016;
+    const elapsed = this.clock.getDelta();
+    const dt = Math.min(elapsed, 0.05) || 0.016;
 
-    this.sendAcc += dt;
-    if (this.sendAcc >= 1 / 30) {
-      this.sendAcc = 0;
-      this.seq++;
-      this.net.send({ type: 'input', keys: { ...this.keys }, seq: this.seq });
+    // Physics runs at the server tick rate whatever the frame rate is.
+    // The cap avoids a burst of inputs after the tab was hidden.
+    this.tickAcc += Math.min(elapsed, 0.25);
+    while (this.tickAcc >= TICK_SEC) {
+      this.tickAcc -= TICK_SEC;
+      this.tick();
     }
 
-    const canDrive = this.phase === 'racing' || this.phase === 'lobby';
-    if (canDrive && !this.pred.finished) {
-      stepCar(this.pred, this.keys, dt);
-    } else if (this.phase === 'countdown') {
-      this.pred.v = 0;
-    }
+    const alpha = this.tickAcc / TICK_SEC;
+    const decay = Math.exp(-12 * dt);
+    this.smooth.x *= decay;
+    this.smooth.z *= decay;
+    this.smooth.heading *= decay;
+    this.view = {
+      x: this.prev.x + (this.pred.x - this.prev.x) * alpha + this.smooth.x,
+      z: this.prev.z + (this.pred.z - this.prev.z) * alpha + this.smooth.z,
+      heading:
+        this.prev.heading +
+        angleDiff(this.pred.heading, this.prev.heading) * alpha +
+        this.smooth.heading,
+    };
 
-    this.myCar.car.position.set(this.pred.x, 0, this.pred.z);
-    this.myCar.car.rotation.y = this.pred.heading;
+    this.myCar.car.position.set(this.view.x, 0, this.view.z);
+    this.myCar.car.rotation.y = this.view.heading;
     this.myCar.shell.rotation.set(this.pred.pitch, 0, this.pred.roll);
     this.myCar.wheels.forEach((w) => {
       w.pivot.rotation.y = w.front ? this.pred.steer : 0;
@@ -271,14 +303,15 @@ export class CarGame {
     });
 
     this.followCamera(dt);
-    this.ground.position.set(Math.round(this.pred.x / 4) * 4, 0, Math.round(this.pred.z / 4) * 4);
-    this.sun.position.set(this.pred.x + 25, 40, this.pred.z + 18);
-    this.sun.target.position.set(this.pred.x, 0, this.pred.z);
+    this.ground.position.set(Math.round(this.view.x / 4) * 4, 0, Math.round(this.view.z / 4) * 4);
+    this.sun.position.set(this.view.x + 25, 40, this.view.z + 18);
+    this.sun.target.position.set(this.view.x, 0, this.view.z);
 
     this.speedEl.firstChild!.nodeValue = String(Math.round(Math.abs(this.pred.v) * 3.6));
     const lapShow = Math.min(this.pred.laps + 1, this.totalLaps);
-    this.lapEl.textContent =
-      this.phase === 'finished'
+    this.lapEl.textContent = this.waiting
+      ? 'Вы в следующем заезде'
+      : this.phase === 'finished'
         ? this.pred.finishPlace
           ? `Финиш · ${this.pred.finishPlace} место`
           : 'Финиш'
@@ -325,7 +358,7 @@ export class CarGame {
       const d = document.createElement('div');
       d.className = r.place <= 3 ? `place${r.place}` : '';
       d.textContent =
-        `${r.place}. ${r.nick} — ${r.totalTime.toFixed(1)} с` +
+        `${r.place}. ${r.nick} — ${r.finished ? `${r.totalTime.toFixed(1)} с` : 'не финишировал'}` +
         (r.best ? ` (лучший круг ${r.best.toFixed(1)})` : '');
       this.resultsList.appendChild(d);
     });
@@ -336,15 +369,15 @@ export class CarGame {
   private followCamera(dt: number) {
     const dist = 7.5 + Math.abs(this.pred.v) * 0.03;
     const target = new THREE.Vector3(
-      this.pred.x - Math.sin(this.pred.heading) * dist,
+      this.view.x - Math.sin(this.view.heading) * dist,
       3.0,
-      this.pred.z - Math.cos(this.pred.heading) * dist,
+      this.view.z - Math.cos(this.view.heading) * dist,
     );
     this.camera.position.lerp(target, 1 - Math.exp(-10 * dt));
     this.camera.lookAt(
-      this.pred.x + Math.sin(this.pred.heading) * 4,
+      this.view.x + Math.sin(this.view.heading) * 4,
       1.2,
-      this.pred.z + Math.cos(this.pred.heading) * 4,
+      this.view.z + Math.cos(this.view.heading) * 4,
     );
     const fov = 60 + Math.min(Math.abs(this.pred.v) / 55, 1) * 14;
     this.camera.fov += (fov - this.camera.fov) * Math.min(1, 3 * dt);
@@ -353,6 +386,7 @@ export class CarGame {
 
   private updateLeaderboard(cars: CarState[]) {
     const rows = [...cars].sort((a, b) => {
+      if (a.waiting !== b.waiting) return a.waiting ? 1 : -1;
       if (a.finished && b.finished) return a.finishPlace - b.finishPlace;
       if (a.finished) return -1;
       if (b.finished) return 1;
@@ -366,7 +400,9 @@ export class CarGame {
     rows.forEach((c, i) => {
       const d = document.createElement('div');
       const me = c.id === this.myId ? ' (вы)' : '';
-      const status = c.finished
+      const status = c.waiting
+        ? 'ждёт заезда'
+        : c.finished
         ? `финиш #${c.finishPlace}`
         : `круг ${Math.min(c.laps + 1, this.totalLaps)}/${this.totalLaps}`;
       d.textContent = `${i + 1}. ${c.nick}${me} — ${status}`;
@@ -561,6 +597,11 @@ export class CarGame {
     this.scene.add(trunks, crowns);
     return ground;
   }
+}
+
+/** Shortest signed difference between two angles. */
+function angleDiff(a: number, b: number) {
+  return Math.atan2(Math.sin(a - b), Math.cos(a - b));
 }
 
 function hex(h: number) {

@@ -3,7 +3,10 @@ import {
   type CarState,
   type RacePhase,
   type RaceResultRow,
+  type InputState,
   TOTAL_LAPS,
+  FINISH_GRACE_SEC,
+  MAX_RACE_SEC,
 } from '../../../../shared/src/messages.js';
 import {
   type CarBody,
@@ -12,12 +15,17 @@ import {
   resolveCollision,
   placeOnGrid,
 } from '../../../../shared/src/games/car/physics.js';
+import { canDrive } from '../../../../shared/src/games/car/prediction.js';
 import { BaseRoom, type PlayerSocket, safeSend } from '../../rooms/BaseRoom.js';
 
 interface CarPlayer {
   socket: PlayerSocket;
   body: CarBody;
+  /** joined mid-race: stays parked until the next one */
+  waiting: boolean;
 }
+
+const byProgress = (a: CarPlayer, b: CarPlayer) => b.body.progress - a.body.progress;
 
 const LOBBY_WAIT_MS = 4000;
 const COUNTDOWN_SEC = 3;
@@ -29,6 +37,10 @@ export class CarRoom extends BaseRoom {
   private countdown = 0;
   private phaseTimer = 0; // seconds accumulator
   private nextPlace = 1;
+  /** phaseTimer value when the first car finished */
+  private firstFinishAt: number | null = null;
+  /** ids of cars that did not cross the line in time */
+  private dnf = new Set<string>();
   private results: RaceResultRow[] = [];
   private lobbyStableMs = 0;
 
@@ -40,23 +52,22 @@ export class CarRoom extends BaseRoom {
     const body = createCar();
     const idx = this.cars.size;
     placeOnGrid(body, idx);
-    this.cars.set(p.id, { socket: p, body });
+    const waiting = this.phase === 'racing' || this.phase === 'finished';
+    this.cars.set(p.id, { socket: p, body, waiting });
 
-    // New player during race joins as spectator-ish (spawned, can drive after next race)
-    if (this.phase === 'lobby') {
-      this.lobbyStableMs = 0;
-      this.regrid();
-    }
+    if (this.phase === 'lobby') this.lobbyStableMs = 0;
+    if (!waiting) this.regrid();
   }
 
   onPlayerLeave(p: PlayerSocket): void {
     this.cars.delete(p.id);
-    if (this.phase === 'lobby') this.regrid();
+    if (this.phase === 'lobby' || this.phase === 'countdown') this.regrid();
   }
 
   private regrid() {
     let i = 0;
     for (const cp of this.cars.values()) {
+      cp.waiting = false;
       placeOnGrid(cp.body, i++);
     }
   }
@@ -64,6 +75,10 @@ export class CarRoom extends BaseRoom {
   onTick(dt: number): void {
     const now = Date.now();
     this.phaseTimer += dt;
+
+    // One input per player per tick in every phase, so none pile up before the start
+    const inputs = new Map<string, InputState>();
+    for (const [id, cp] of this.cars) inputs.set(id, cp.socket.inputs.next());
 
     if (this.phase === 'lobby') {
       this.lobbyStableMs += dt * 1000;
@@ -91,19 +106,16 @@ export class CarRoom extends BaseRoom {
     }
 
     // racing
-    const list = [...this.cars.values()];
-    const empty = { up: false, down: false, left: false, right: false, brake: false };
+    const list = [...this.cars.values()].filter((cp) => canDrive(this.phase, cp.waiting));
+    // Everyone who started has left: free the room for those waiting
+    if (list.length === 0) {
+      this.resetToLobby();
+      return;
+    }
 
     for (const cp of list) {
-      const input = cp.body.finished ? empty : cp.socket.lastInput;
-      stepCar(cp.body, input, dt, now);
-
-      if (!cp.body.finished && cp.body.laps >= TOTAL_LAPS) {
-        cp.body.finished = true;
-        cp.body.finishPlace = this.nextPlace++;
-        cp.body.totalTime = (now - cp.body.raceStart) / 1000;
-        cp.body.v *= 0.5;
-      }
+      // stepCar ignores the keys of a finished car and lets it coast
+      stepCar(cp.body, inputs.get(cp.socket.id)!, dt, now);
     }
 
     for (let i = 0; i < list.length; i++) {
@@ -113,23 +125,34 @@ export class CarRoom extends BaseRoom {
       }
     }
 
-    const allDone =
-      list.length > 0 && list.every((c) => c.body.finished);
-    // Or first finisher + 25s grace
-    const someoneFinished = list.some((c) => c.body.finished);
-    if (allDone || (someoneFinished && this.phaseTimer > 25 && list.filter((c) => !c.body.finished).length === 0)) {
-      this.endRace();
-    } else if (someoneFinished && this.phaseTimer > 40) {
-      // force end slow players
-      for (const cp of list) {
-        if (!cp.body.finished) {
-          cp.body.finished = true;
-          cp.body.finishPlace = this.nextPlace++;
-          cp.body.totalTime = (now - cp.body.raceStart) / 1000;
-        }
+    // Cars that crossed the line on the same tick: the one further ahead wins
+    const arrived = list
+      .filter((cp) => !cp.body.finished && cp.body.laps >= TOTAL_LAPS)
+      .sort(byProgress);
+    for (const cp of arrived) {
+      this.finishCar(cp, now);
+      cp.body.v *= 0.5;
+      this.firstFinishAt ??= this.phaseTimer;
+    }
+
+    const allDone = list.every((c) => c.body.finished);
+    const graceOver =
+      this.firstFinishAt !== null && this.phaseTimer - this.firstFinishAt >= FINISH_GRACE_SEC;
+
+    if (allDone || graceOver || this.phaseTimer >= MAX_RACE_SEC) {
+      // Everyone still on track is ranked by distance covered
+      for (const cp of list.filter((c) => !c.body.finished).sort(byProgress)) {
+        this.dnf.add(cp.socket.id);
+        this.finishCar(cp, now);
       }
       this.endRace();
     }
+  }
+
+  private finishCar(cp: CarPlayer, now: number) {
+    cp.body.finished = true;
+    cp.body.finishPlace = this.nextPlace++;
+    cp.body.totalTime = (now - cp.body.raceStart) / 1000;
   }
 
   private beginCountdown() {
@@ -147,6 +170,8 @@ export class CarRoom extends BaseRoom {
     this.phase = 'racing';
     this.phaseTimer = 0;
     this.nextPlace = 1;
+    this.firstFinishAt = null;
+    this.dnf.clear();
     this.results = [];
     for (const cp of this.cars.values()) {
       cp.body.raceStart = now;
@@ -164,12 +189,14 @@ export class CarRoom extends BaseRoom {
     this.phase = 'finished';
     this.phaseTimer = 0;
     this.results = [...this.cars.values()]
+      .filter((cp) => !cp.waiting)
       .map((cp) => ({
         id: cp.socket.id,
         nick: cp.socket.nick,
         place: cp.body.finishPlace || 99,
         best: +cp.body.best.toFixed(1),
         totalTime: +cp.body.totalTime.toFixed(1),
+        finished: !this.dnf.has(cp.socket.id),
       }))
       .sort((a, b) => a.place - b.place);
 
@@ -187,7 +214,7 @@ export class CarRoom extends BaseRoom {
     this.regrid();
   }
 
-  getStateFor(_p: PlayerSocket): ServerMessage {
+  getStateFor(p: PlayerSocket): ServerMessage {
     const cars: CarState[] = [];
     for (const [id, cp] of this.cars) {
       const b = cp.body;
@@ -205,6 +232,7 @@ export class CarRoom extends BaseRoom {
         nick: cp.socket.nick,
         finished: b.finished,
         finishPlace: b.finishPlace,
+        waiting: cp.waiting,
       });
     }
     return {
@@ -214,6 +242,7 @@ export class CarRoom extends BaseRoom {
       countdown: this.phase === 'countdown' ? this.countdown : undefined,
       totalLaps: TOTAL_LAPS,
       cars,
+      ack: p.inputs.ack,
     };
   }
 }
